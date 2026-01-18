@@ -54,19 +54,23 @@ class MachineParams(BaseModel):
         description="Z-axis range in mm (min, max)"
     )
     z_steps_per_mm: float = Field(default=100.0, ge=1, description="Z-axis steps per mm")
-    
+    z_axis_min_speed: int = Field(default=100, ge=1, description="Z-axis minimum speed (steps/sec)")
+    z_axis_max_speed: int = Field(default=5000, ge=1, description="Z-axis maximum speed (steps/sec)")
+    z_axis_acc_time: int = Field(default=100, ge=1, description="Z-axis acceleration time (ms)")
+    z_axis_settle_ms: int = Field(default=500, ge=0, description="Delay after Z move for mechanical settling (ms)")
+
     # Safety margins
     edge_margin_mm: float = Field(default=2.0, ge=0, description="Safety margin from field edges")
     
     @property
     def galvo_max(self) -> int:
         """Maximum galvo coordinate value."""
-        return (2 ** self.galvo_bits) - 1
-    
+        return int((2 ** self.galvo_bits) - 1)
+
     @property
     def galvo_center(self) -> int:
         """Center galvo coordinate value."""
-        return 2 ** (self.galvo_bits - 1)
+        return int(2 ** (self.galvo_bits - 1))
     
     @property
     def mm_per_galvo_unit(self) -> tuple[float, float]:
@@ -133,7 +137,7 @@ class PointCloudParams(BaseModel):
     )
     
     # Generation strategy
-    strategy: Literal["surface", "solid", "grayscale"] = Field(
+    strategy: Literal["surface", "solid", "grayscale", "contour"] = Field(
         default="surface",
         description="Point generation strategy"
     )

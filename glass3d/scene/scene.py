@@ -12,11 +12,11 @@ from __future__ import annotations
 import json
 import uuid
 from pathlib import Path
-from typing import TYPE_CHECKING, Sequence
+from typing import TYPE_CHECKING, Any, Literal, Sequence
 
 import numpy as np
 import trimesh
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 from .transform import Transform3D
 
@@ -138,6 +138,9 @@ class ModelPlacement(BaseModel):
     )
     visible: bool = Field(default=True, description="Whether model is visible")
 
+    # Private attribute for cached mesh data (not serialized)
+    _mesh: trimesh.Trimesh | None = PrivateAttr(default=None)
+
     model_config = {"frozen": False}
 
     def get_absolute_path(self, base_dir: Path | None = None) -> Path:
@@ -180,7 +183,7 @@ class Scene(BaseModel):
     )
 
     # Default generation parameters
-    default_strategy: str = Field(
+    default_strategy: Literal["surface", "solid", "grayscale", "contour"] = Field(
         default="surface",
         description="Default point generation strategy"
     )
@@ -206,7 +209,7 @@ class Scene(BaseModel):
         position: tuple[float, float, float] = (0.0, 0.0, 0.0),
         rotation: tuple[float, float, float] = (0.0, 0.0, 0.0),
         scale: float = 1.0,
-        **kwargs,
+        **kwargs: Any,
     ) -> ModelPlacement:
         """Add a model to the scene.
 
@@ -555,7 +558,7 @@ class Scene(BaseModel):
         max_z = bounds[1][2]
         height = max_z - min_z
 
-        return min_z <= z_tolerance and height <= max_height
+        return bool(min_z <= z_tolerance and height <= max_height)
 
     def get_anchor_status(self, model: ModelPlacement) -> tuple[bool, str]:
         """Check if a model should be skipped and return the reason.

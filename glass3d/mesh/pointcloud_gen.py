@@ -7,7 +7,7 @@ Each strategy produces different visual effects in the final engraving.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from numpy.typing import NDArray
@@ -360,7 +360,7 @@ class ContourStrategy(BaseStrategy):
     
     def _sample_ring(
         self,
-        ring,
+        ring: Any,  # shapely LinearRing or LineString
         z_height: float,
         spacing: float,
     ) -> list[tuple[float, float, float]]:
@@ -380,8 +380,8 @@ class ContourStrategy(BaseStrategy):
         return points
 
 
-# Strategy registry
-STRATEGIES = {
+# Strategy registry - maps names to concrete strategy classes
+STRATEGIES: dict[str, type[BaseStrategy]] = {
     "surface": SurfaceStrategy,
     "solid": SolidStrategy,
     "grayscale": GrayscaleStrategy,
@@ -403,17 +403,19 @@ def get_strategy(name: str) -> BaseStrategy:
     """
     if name not in STRATEGIES:
         raise ValueError(f"Unknown strategy: {name}. Available: {list(STRATEGIES.keys())}")
-    
-    return STRATEGIES[name]()
+
+    # All registered strategies are concrete classes
+    return STRATEGIES[name]()  # type: ignore[abstract]
 
 
-def list_strategies() -> list[dict]:
+def list_strategies() -> list[dict[str, str]]:
     """List all available strategies with descriptions.
-    
+
     Returns:
         List of dicts with 'name' and 'description' keys
     """
+    # All registered strategies are concrete classes
     return [
-        {"name": cls().name, "description": cls().description}
+        {"name": cls().name, "description": cls().description}  # type: ignore[abstract]
         for cls in STRATEGIES.values()
     ]

@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import sys
 from pathlib import Path
+from typing import Literal, cast
 
 import click
 from rich.console import Console
@@ -268,7 +269,10 @@ def engrave(
     cfg.mock_laser = mock
     cfg.point_cloud.point_spacing_mm = spacing
     cfg.point_cloud.layer_height_mm = layer_height
-    cfg.point_cloud.strategy = strategy
+    # Cast validated Click choice to Literal type
+    cfg.point_cloud.strategy = cast(
+        Literal["surface", "solid", "grayscale", "contour"], strategy
+    )
     cfg.engrave.dry_run = dry_run
 
     console.print(f"\n[bold]Glass3D Engraver[/bold]\n")
@@ -399,7 +403,10 @@ def preview(
     else:
         cfg = Glass3DConfig.default()
     cfg.point_cloud.point_spacing_mm = spacing
-    cfg.point_cloud.strategy = strategy
+    # Cast validated Click choice to Literal type
+    cfg.point_cloud.strategy = cast(
+        Literal["surface", "solid", "grayscale", "contour"], strategy
+    )
 
     # Get workspace bounds from config's machine params
     workspace = WorkspaceBounds.from_machine_params(cfg.machine)

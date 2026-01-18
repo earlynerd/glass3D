@@ -11,6 +11,7 @@ import logging
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
+from types import TracebackType
 from typing import TYPE_CHECKING, Callable, Iterator
 
 import numpy as np
@@ -21,6 +22,57 @@ if TYPE_CHECKING:
     from ..core.point_cloud import PointCloud
 
 logger = logging.getLogger(__name__)
+
+
+def optimize_path_nearest_neighbor(
+    points: NDArray[np.float64],
+    start_point: tuple[float, float] | None = None,
+) -> NDArray[np.intp]:
+    """Optimize point order using nearest-neighbor algorithm.
+
+    This is a greedy approach that always moves to the closest unvisited point.
+    Not globally optimal but fast O(n²) and produces reasonable results.
+
+    Args:
+        points: Nx3 array of XYZ coordinates (only XY used for distance)
+        start_point: Optional (x, y) to start from. If None, starts from first point.
+
+    Returns:
+        Array of indices representing the optimized visit order
+    """
+    n = len(points)
+    if n <= 2:
+        return np.arange(n)
+
+    # Work with XY coordinates only
+    xy = points[:, :2]
+
+    visited = np.zeros(n, dtype=bool)
+    order = np.empty(n, dtype=np.intp)
+
+    # Find starting point
+    if start_point is not None:
+        # Start from point closest to start_point
+        start_xy = np.array(start_point)
+        dists = np.sum((xy - start_xy) ** 2, axis=1)
+        current = int(np.argmin(dists))
+    else:
+        current = 0
+
+    order[0] = current
+    visited[current] = True
+
+    for i in range(1, n):
+        # Find nearest unvisited point
+        current_xy = xy[current]
+        dists = np.sum((xy - current_xy) ** 2, axis=1)
+        dists[visited] = np.inf  # Exclude visited points
+
+        current = int(np.argmin(dists))
+        order[i] = current
+        visited[current] = True
+
+    return order
 
 
 @dataclass
@@ -295,23 +347,114 @@ class LaserController:
             frequency=params.frequency,
         )
     
-    def set_z_position(self, z_mm: float) -> None:
-        """Set the Z-axis position (focus depth).
-        
-        Note: Actual Z control depends on your hardware setup.
-        This may need customization for your specific Z-axis control.
-        
+    def _mm_to_z_steps(self, z_mm: float) -> int:
+        """Convert Z position in mm to stepper steps.
+
         Args:
             z_mm: Z position in mm
+
+        Returns:
+            Position in steps (integer)
         """
+        return int(z_mm * self.config.machine.z_steps_per_mm)
+
+    def set_z_position(self, z_mm: float, wait: bool = True) -> None:
+        """Set the Z-axis position (focus depth).
+
+        Moves the Z-axis stepper motor to the specified position using
+        the BJJCZ controller's auxiliary axis control.
+
+        Args:
+            z_mm: Z position in mm (absolute position)
+            wait: If True, block until movement completes
+        """
+        if not self._controller:
+            logger.warning("Cannot set Z position: controller not connected")
+            return
+
+        # Validate Z is within range
+        z_min, z_max = self.config.machine.z_range_mm
+        if z_mm < z_min or z_mm > z_max:
+            raise ValueError(
+                f"Z position {z_mm:.2f}mm out of range [{z_min:.1f}, {z_max:.1f}]mm"
+            )
+
+        # Convert mm to steps
+        z_steps = self._mm_to_z_steps(z_mm)
+
+        # Get motion parameters from config
+        min_speed = self.config.machine.z_axis_min_speed
+        max_speed = self.config.machine.z_axis_max_speed
+        acc_time = self.config.machine.z_axis_acc_time
+
+        logger.debug(
+            f"Moving Z to {z_mm:.3f}mm ({z_steps} steps), "
+            f"speed: {min_speed}-{max_speed}, acc: {acc_time}ms"
+        )
+
+        # Use galvoplotter's rotary/axis control
+        # This sets motion params, converts position, moves, and waits
+        self._controller.set_axis_motion_param(min_speed & 0xFFFF, max_speed & 0xFFFF)
+        self._controller.set_axis_origin_param(acc_time)
+
+        # Convert position to 32-bit format (handle negative values)
+        pos = z_steps if z_steps >= 0 else -z_steps + 0x80000000
+        p1 = (pos >> 16) & 0xFFFF
+        p0 = pos & 0xFFFF
+        self._controller.move_axis_to(p0, p1)
+
+        if wait:
+            self._controller.wait_axis()
+
         self._current_z_mm = z_mm
-        # TODO: Implement actual Z-axis control
-        # This depends on whether Z is controlled via:
-        # - Separate stepper motor
-        # - Controller GPIO
-        # - Serial command
         logger.debug(f"Z position set to {z_mm:.3f}mm")
-    
+
+    def z_home(self, wait: bool = True) -> None:
+        """Home the Z-axis to its origin position.
+
+        This sends the axis to its home/origin position as configured
+        in the BJJCZ controller.
+
+        Args:
+            wait: If True, block until homing completes
+        """
+        if not self._controller:
+            logger.warning("Cannot home Z: controller not connected")
+            return
+
+        logger.info("Homing Z-axis...")
+        self._controller.axis_go_origin()
+
+        if wait:
+            self._controller.wait_axis()
+
+        self._current_z_mm = 0.0
+        logger.info("Z-axis homed")
+
+    def get_z_position(self) -> float:
+        """Get the current Z-axis position from the controller.
+
+        Returns:
+            Current Z position in mm
+        """
+        if not self._controller:
+            logger.warning("Cannot get Z position: controller not connected")
+            return self._current_z_mm
+
+        # Read position from controller (returns tuple with position data)
+        result = self._controller.get_axis_pos(0)
+        if result and len(result) >= 3:
+            # Position is split across result[1] and result[2]
+            pos = (result[1] << 16) | result[2]
+            # Handle negative values (sign bit at 0x80000000)
+            if pos >= 0x80000000:
+                pos = -(pos - 0x80000000)
+            z_mm = pos / self.config.machine.z_steps_per_mm
+            self._current_z_mm = z_mm
+            return z_mm
+
+        return self._current_z_mm
+
     def validate_point_cloud(self, cloud: PointCloud) -> tuple[bool, list[str]]:
         """Validate that point cloud is safe to engrave.
 
@@ -390,7 +533,9 @@ class LaserController:
         """
         if not self._connected:
             self.connect()
-        
+
+        assert self._controller is not None, "Controller not initialized after connect()"
+
         # Validate
         if self.config.engrave.validate_bounds:
             valid, issues = self.validate_point_cloud(cloud)
@@ -417,54 +562,81 @@ class LaserController:
                 context = self._controller.lighting()
             else:
                 context = self._controller.marking()
-            
+
+            optimize_xy = self.config.engrave.optimize_path
+            total_layers = cloud.num_layers
+
             with context as c:
-                current_z = None
                 points_since_pause = 0
-                
-                for i, point in enumerate(cloud.points):
+                last_xy: tuple[float, float] | None = None
+
+                # Iterate layer by layer (sorted by Z ascending)
+                for layer_idx, layer_cloud in cloud.iter_layers():
                     self._check_abort()
-                    
-                    x_mm, y_mm, z_mm = point
-                    
-                    # Update Z if changed
-                    if current_z != z_mm:
-                        # In a real implementation, this would move the Z axis
-                        self.set_z_position(z_mm)
-                        current_z = z_mm
-                    
-                    # Convert to galvo coordinates
-                    x_galvo, y_galvo = self.transformer.mm_to_galvo_coords(x_mm, y_mm)
-                    
-                    # Move to position and fire
-                    c.goto(x_galvo, y_galvo)
-                    
-                    if dry_run:
-                        c.light(x_galvo, y_galvo)
-                        time.sleep(0.0001)  # Brief delay for preview
-                    else:
-                        c.dwell(dwell_ms)
-                    
-                    completed += 1
-                    points_since_pause += 1
-                    
-                    # Thermal pause if needed
-                    if points_since_pause >= self.config.material.max_continuous_points:
-                        logger.debug("Thermal pause")
-                        time.sleep(self.config.material.thermal_pause_ms / 1000)
-                        points_since_pause = 0
-                    
-                    # Progress callback
-                    if progress_callback and (i % chunk_size == 0 or i == total_points - 1):
-                        progress = EngraveProgress(
-                            total_points=total_points,
-                            completed_points=completed,
-                            current_layer=int(cloud.layer_indices[i]) if cloud.layer_indices is not None else 0,
-                            total_layers=cloud.num_layers,
-                            elapsed_seconds=time.time() - start_time,
-                        )
-                        progress_callback(progress)
-            
+
+                    layer_points = layer_cloud.points
+                    if len(layer_points) == 0:
+                        continue
+
+                    # Move Z axis once at start of layer
+                    # Use mean Z of layer to handle any floating-point variations
+                    layer_z = float(np.mean(layer_points[:, 2]))
+                    self.set_z_position(layer_z)
+
+                    # Wait for mechanical settling (brake disengage, motor movement, vibration)
+                    z_settle_ms = self.config.machine.z_axis_settle_ms
+                    if z_settle_ms > 0:
+                        time.sleep(z_settle_ms / 1000.0)
+
+                    logger.debug(f"Layer {layer_idx}: Z={layer_z:.3f}mm, {len(layer_points)} points")
+
+                    # Optimize XY path within this layer
+                    if optimize_xy and len(layer_points) > 2:
+                        order = optimize_path_nearest_neighbor(layer_points, last_xy)
+                        layer_points = layer_points[order]
+
+                    # Engrave all points in this layer
+                    for point in layer_points:
+                        self._check_abort()
+
+                        x_mm, y_mm = point[0], point[1]
+
+                        # Convert to galvo coordinates
+                        x_galvo, y_galvo = self.transformer.mm_to_galvo_coords(x_mm, y_mm)
+
+                        # Move to position and fire
+                        c.goto(x_galvo, y_galvo)
+
+                        if dry_run:
+                            c.light(x_galvo, y_galvo)
+                            time.sleep(0.0001)  # Brief delay for preview
+                        else:
+                            c.dwell(dwell_ms)
+
+                        completed += 1
+                        points_since_pause += 1
+
+                        # Thermal pause if needed
+                        if points_since_pause >= self.config.material.max_continuous_points:
+                            logger.debug("Thermal pause")
+                            time.sleep(self.config.material.thermal_pause_ms / 1000)
+                            points_since_pause = 0
+
+                        # Progress callback
+                        if progress_callback and (completed % chunk_size == 0 or completed == total_points):
+                            progress = EngraveProgress(
+                                total_points=total_points,
+                                completed_points=completed,
+                                current_layer=layer_idx,
+                                total_layers=total_layers,
+                                elapsed_seconds=time.time() - start_time,
+                            )
+                            progress_callback(progress)
+
+                    # Remember last position for next layer's path optimization
+                    if len(layer_points) > 0:
+                        last_xy = (float(layer_points[-1, 0]), float(layer_points[-1, 1]))
+
             # Wait for completion
             self._controller.wait_for_machine_idle()
             
@@ -488,9 +660,11 @@ class LaserController:
         """
         if not self._connected:
             self.connect()
-        
+
+        assert self._controller is not None, "Controller not initialized after connect()"
+
         min_pt, max_pt = cloud.bounds
-        
+
         # Corner coordinates
         corners = [
             (min_pt[0], min_pt[1]),
@@ -517,6 +691,11 @@ class LaserController:
         self.connect()
         return self
     
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
         """Context manager exit."""
         self.disconnect()

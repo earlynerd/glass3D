@@ -127,10 +127,13 @@ class MeshLoader:
         """
         # Remove duplicate vertices
         self._mesh.merge_vertices()
-        
-        # Remove degenerate faces
-        self._mesh.remove_degenerate_faces()
-        
+
+        # Remove degenerate faces (faces with zero area or repeated vertices)
+        # nondegenerate_faces returns a boolean mask of valid faces
+        valid_faces = self._mesh.nondegenerate_faces()
+        if not valid_faces.all():
+            self._mesh.update_faces(valid_faces)
+
         # Fix normals for watertight meshes
         if self._mesh.is_watertight:
             self._mesh.fix_normals()

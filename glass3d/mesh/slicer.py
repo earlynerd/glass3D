@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Iterator
 import numpy as np
 import trimesh
 from numpy.typing import NDArray
+from trimesh.path import Path2D
 
 
 @dataclass
@@ -38,16 +39,16 @@ class SliceResult:
     @property
     def polygons(self) -> list:
         """Return list of shapely polygons for this slice."""
-        if self.is_empty:
+        if self.path_2d is None or len(self.path_2d.entities) == 0:
             return []
-        return self.path_2d.polygons_full
-    
+        return list(self.path_2d.polygons_full)
+
     @property
     def area(self) -> float:
         """Return total area of all polygons in this slice."""
         if self.is_empty:
             return 0.0
-        return sum(p.area for p in self.polygons)
+        return float(sum(p.area for p in self.polygons))
 
 
 class MeshSlicer:
@@ -210,7 +211,7 @@ class MeshSlicer:
     def iter_slices(
         self,
         layer_height: float,
-        **kwargs,
+        **kwargs: float,
     ) -> Iterator[SliceResult]:
         """Iterate over slices (memory-efficient for large meshes).
         
@@ -231,16 +232,17 @@ class MeshSlicer:
             result.layer_index = i
             yield result
     
-    def multiplane_slice(self, layer_height: float) -> tuple[list, list, list]:
+    def multiplane_slice(self, layer_height: float) -> list[Path2D | None]:
         """Use trimesh's optimized multiplane slicing.
-        
+
         This is faster than individual slices for many layers.
-        
+
         Args:
             layer_height: Distance between slices
-            
+
         Returns:
-            Tuple of (lines, transforms, face_indices) from trimesh
+            List of Path2D objects (or None for empty slices) at each height.
+            Each path's metadata['to_3D'] contains the transform back to 3D.
         """
         z_levels = np.arange(0, self.z_height + layer_height / 2, layer_height)
         
