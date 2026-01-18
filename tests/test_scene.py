@@ -121,10 +121,10 @@ class TestWorkspaceBounds:
     """Test WorkspaceBounds functionality."""
 
     def test_default_bounds(self):
-        """Test default workspace bounds."""
+        """Test default workspace bounds (corner-origin like slicer)."""
         ws = WorkspaceBounds()
-        assert ws.x_range == (-55.0, 55.0)
-        assert ws.y_range == (-55.0, 55.0)
+        assert ws.x_range == (0.0, 110.0)
+        assert ws.y_range == (0.0, 110.0)
         assert ws.z_range == (0.0, 100.0)
 
     def test_size(self):
@@ -135,29 +135,29 @@ class TestWorkspaceBounds:
     def test_center(self):
         """Test center calculation."""
         ws = WorkspaceBounds()
-        assert ws.center == (0.0, 0.0, 50.0)
+        assert ws.center == (55.0, 55.0, 50.0)
 
     def test_contains_point_inside(self):
         """Test that points inside bounds return True."""
         ws = WorkspaceBounds()
-        assert ws.contains_point(0, 0, 50) is True
-        assert ws.contains_point(-50, 50, 0) is True
+        assert ws.contains_point(55, 55, 50) is True
+        assert ws.contains_point(0, 100, 0) is True
 
     def test_contains_point_outside(self):
         """Test that points outside bounds return False."""
         ws = WorkspaceBounds()
-        assert ws.contains_point(100, 0, 0) is False
-        assert ws.contains_point(0, 0, -10) is False
+        assert ws.contains_point(120, 50, 50) is False
+        assert ws.contains_point(50, 50, -10) is False
 
     def test_contains_bounds_inside(self):
         """Test bounding box containment."""
         ws = WorkspaceBounds()
-        assert ws.contains_bounds([-10, -10, 10], [10, 10, 20]) is True
+        assert ws.contains_bounds([10, 10, 10], [50, 50, 20]) is True
 
     def test_contains_bounds_outside(self):
         """Test bounding box outside workspace."""
         ws = WorkspaceBounds()
-        assert ws.contains_bounds([-100, -10, 10], [10, 10, 20]) is False
+        assert ws.contains_bounds([-10, 10, 10], [50, 50, 20]) is False
 
 
 class TestModelPlacement:

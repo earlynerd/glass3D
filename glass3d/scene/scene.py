@@ -30,15 +30,18 @@ class WorkspaceBounds(BaseModel):
 
     Defines the valid region where models can be placed.
     Based on the galvo field size and Z-axis range.
+
+    Uses corner-origin coordinates (0,0,0 at corner) to match
+    slicer software conventions where the bed origin is at the corner.
     """
 
     x_range: tuple[float, float] = Field(
-        default=(-55.0, 55.0),
-        description="X-axis bounds in mm (centered at 0)"
+        default=(0.0, 110.0),
+        description="X-axis bounds in mm (0 at corner)"
     )
     y_range: tuple[float, float] = Field(
-        default=(-55.0, 55.0),
-        description="Y-axis bounds in mm (centered at 0)"
+        default=(0.0, 110.0),
+        description="Y-axis bounds in mm (0 at corner)"
     )
     z_range: tuple[float, float] = Field(
         default=(0.0, 100.0),
@@ -55,11 +58,9 @@ class WorkspaceBounds(BaseModel):
         Returns:
             WorkspaceBounds matching the machine configuration
         """
-        half_x = params.field_size_mm[0] / 2
-        half_y = params.field_size_mm[1] / 2
         return cls(
-            x_range=(-half_x, half_x),
-            y_range=(-half_y, half_y),
+            x_range=(0.0, params.field_size_mm[0]),
+            y_range=(0.0, params.field_size_mm[1]),
             z_range=params.z_range_mm,
         )
 
@@ -531,6 +532,79 @@ class Scene(BaseModel):
         """
         return "anchor" in name.lower()
 
+    @staticmethod
+    def is_anchor_geometry(mesh: trimesh.Trimesh, z_tolerance: float = 0.5, max_height: float = 2.0) -> bool:
+        """Check if a mesh looks like an anchor based on its geometry.
+
+        A mesh is considered an anchor if:
+        - Its minimum Z is close to 0 (touching the bed)
+        - Its total height (Z extent) is small
+
+        This is a fallback for when anchors aren't properly named.
+
+        Args:
+            mesh: The transformed mesh to check
+            z_tolerance: How close to Z=0 the bottom must be (default 0.5mm)
+            max_height: Maximum height to be considered an anchor (default 2.0mm)
+
+        Returns:
+            True if this mesh appears to be an anchor
+        """
+        bounds = mesh.bounds  # [[min_x, min_y, min_z], [max_x, max_y, max_z]]
+        min_z = bounds[0][2]
+        max_z = bounds[1][2]
+        height = max_z - min_z
+
+        return min_z <= z_tolerance and height <= max_height
+
+    def get_anchor_status(self, model: ModelPlacement) -> tuple[bool, str]:
+        """Check if a model should be skipped and return the reason.
+
+        Args:
+            model: The model to check
+
+        Returns:
+            Tuple of (is_anchor, reason_string)
+            reason_string is empty if not an anchor, or one of:
+            - "name": anchor detected by name
+            - "geometry": entire mesh is anchor geometry
+            - "partial": mesh contains anchor components that will be filtered
+        """
+        # Check by name first
+        if self.is_anchor_model(model.name):
+            return True, "name"
+
+        # Check by geometry (need to load and transform mesh)
+        try:
+            if hasattr(model, '_mesh') and model._mesh is not None:
+                mesh = model._mesh.copy()
+            else:
+                from ..mesh.loader import MeshLoader
+                path = model.get_absolute_path()
+                loader = MeshLoader(path)
+                mesh = loader.mesh
+
+            transform_matrix = model.transform.to_matrix()
+            mesh.apply_transform(transform_matrix)
+
+            # Check if entire mesh is an anchor
+            if self.is_anchor_geometry(mesh):
+                return True, "geometry"
+
+            # Check for anchor components within the mesh (assemblies)
+            if hasattr(mesh, 'split'):
+                components = mesh.split()
+                if len(components) > 1:
+                    anchor_count = sum(1 for c in components if self.is_anchor_geometry(c))
+                    if anchor_count == len(components):
+                        return True, "geometry"
+                    elif anchor_count > 0:
+                        return False, f"partial:{anchor_count}"
+        except Exception:
+            pass
+
+        return False, ""
+
     def to_combined_point_cloud(
         self,
         params: PointCloudParams | None = None,
@@ -588,6 +662,27 @@ class Scene(BaseModel):
             # Apply transform to mesh
             transform_matrix = model.transform.to_matrix()
             mesh.apply_transform(transform_matrix)
+
+            # Skip if entire geometry looks like an anchor (flat object at Z=0)
+            if self.is_anchor_geometry(mesh):
+                continue
+
+            # Split mesh into disconnected components and filter out anchor parts
+            # This handles assemblies where anchor + model are merged into one mesh
+            if hasattr(mesh, 'split'):
+                components = mesh.split()
+                if len(components) > 1:
+                    # Filter out anchor-like components
+                    non_anchor_components = [
+                        c for c in components
+                        if not self.is_anchor_geometry(c)
+                    ]
+                    if len(non_anchor_components) == 0:
+                        # All components are anchors, skip entire mesh
+                        continue
+                    elif len(non_anchor_components) < len(components):
+                        # Some components were anchors, recombine the rest
+                        mesh = trimesh.util.concatenate(non_anchor_components)
 
             # Determine strategy (model override or scene default)
             strategy_name = model.strategy or params.strategy

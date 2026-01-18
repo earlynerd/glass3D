@@ -95,8 +95,9 @@ def _load_and_generate_point_cloud(
         console.print(f"[cyan]Loaded 3MF scene: {scene.name}[/cyan]")
         console.print(f"Models: {len(scene.models)}")
 
-        # Count anchor models
-        anchor_count = sum(1 for m in scene.models if Scene.is_anchor_model(m.name))
+        # Check anchor status for all models (by name and geometry)
+        anchor_statuses = {m.id: scene.get_anchor_status(m) for m in scene.models}
+        anchor_count = sum(1 for is_anchor, _ in anchor_statuses.values() if is_anchor)
         if anchor_count > 0:
             console.print(f"[dim]({anchor_count} anchor model(s) will be excluded)[/dim]")
 
@@ -111,13 +112,21 @@ def _load_and_generate_point_cloud(
         for model in scene.models:
             pos = model.transform.position
             rot = model.transform.rotation
-            is_anchor = Scene.is_anchor_model(model.name)
+            is_anchor, reason = anchor_statuses[model.id]
+            if is_anchor:
+                status = f"[yellow]anchor ({reason})[/yellow]"
+            elif reason.startswith("partial:"):
+                # Assembly with some anchor components
+                count = reason.split(":")[1]
+                status = f"[dim]{count} anchor part(s) filtered[/dim]"
+            else:
+                status = ""
             table.add_row(
                 model.name,
                 f"({pos[0]:.1f}, {pos[1]:.1f}, {pos[2]:.1f})",
                 f"({rot[0]:.0f}, {rot[1]:.0f}, {rot[2]:.0f})",
                 f"{model.transform.scale:.2f}",
-                "[yellow]anchor (skipped)[/yellow]" if is_anchor else "",
+                status,
             )
         console.print(table)
 
@@ -339,6 +348,11 @@ def engrave(
 @main.command()
 @click.argument("model_path", type=click.Path(exists=True))
 @click.option(
+    "--config", "-c",
+    type=click.Path(exists=True),
+    help="Path to configuration file (for workspace bounds)",
+)
+@click.option(
     "--strategy", "-s",
     type=click.Choice(["surface", "solid", "grayscale", "contour"]),
     default="surface",
@@ -364,6 +378,7 @@ def engrave(
 )
 def preview(
     model_path: str,
+    config: str | None,
     strategy: str,
     spacing: float,
     max_size: float,
@@ -378,12 +393,16 @@ def preview(
     """
     from .scene import WorkspaceBounds
 
-    cfg = Glass3DConfig.default()
+    # Load config
+    if config:
+        cfg = Glass3DConfig.from_file(config)
+    else:
+        cfg = Glass3DConfig.default()
     cfg.point_cloud.point_spacing_mm = spacing
     cfg.point_cloud.strategy = strategy
 
-    # Get workspace bounds (default or from config)
-    workspace = WorkspaceBounds()
+    # Get workspace bounds from config's machine params
+    workspace = WorkspaceBounds.from_machine_params(cfg.machine)
 
     console.print(f"\n[bold]Point Cloud Preview[/bold]\n")
 
@@ -439,7 +458,7 @@ def preview(
                 [corners[i, 0], corners[j, 0]],
                 [corners[i, 1], corners[j, 1]],
                 [corners[i, 2], corners[j, 2]],
-                color='gray', linewidth=0.8, alpha=0.5
+                color='steelblue', linewidth=1.5, alpha=0.7
             )
 
         # Draw floor grid on Z=0 plane
@@ -456,17 +475,16 @@ def preview(
         ax.set_zlabel('Z (mm)')
         ax.set_title(f'{Path(model_path).name} - {len(cloud):,} points')
 
-        # Set axis limits to workspace bounds
-        ax.set_xlim(x_min, x_max)
-        ax.set_ylim(y_min, y_max)
-        ax.set_zlim(z_min, z_max)
+        # Set axis limits with equal scaling to preserve proportions
+        # Find the largest dimension and center all axes on that range
+        max_range = max(x_max - x_min, y_max - y_min, z_max - z_min)
+        x_mid = (x_min + x_max) / 2
+        y_mid = (y_min + y_max) / 2
+        z_mid = (z_min + z_max) / 2
 
-        # Try to set equal aspect ratio
-        ax.set_box_aspect([
-            workspace.size[0],
-            workspace.size[1],
-            workspace.size[2],
-        ])
+        ax.set_xlim(x_mid - max_range / 2, x_mid + max_range / 2)
+        ax.set_ylim(y_mid - max_range / 2, y_mid + max_range / 2)
+        ax.set_zlim(z_mid - max_range / 2, z_mid + max_range / 2)
 
         plt.tight_layout()
         plt.show()
@@ -498,8 +516,9 @@ def info(model_path: str) -> None:
             console.print(f"[cyan]Scene name:[/cyan] {scene.name}")
             console.print(f"[cyan]Models:[/cyan] {len(scene.models)}")
 
-            # Count anchor models
-            anchor_count = sum(1 for m in scene.models if Scene.is_anchor_model(m.name))
+            # Check anchor status for all models (by name and geometry)
+            anchor_statuses = {m.id: scene.get_anchor_status(m) for m in scene.models}
+            anchor_count = sum(1 for is_anchor, _ in anchor_statuses.values() if is_anchor)
             if anchor_count > 0:
                 console.print(f"[dim]({anchor_count} anchor model(s) will be excluded)[/dim]")
             console.print()
@@ -515,13 +534,20 @@ def info(model_path: str) -> None:
             for model in scene.models:
                 pos = model.transform.position
                 rot = model.transform.rotation
-                is_anchor = Scene.is_anchor_model(model.name)
+                is_anchor, reason = anchor_statuses[model.id]
+                if is_anchor:
+                    status = f"[yellow]anchor ({reason})[/yellow]"
+                elif reason.startswith("partial:"):
+                    count = reason.split(":")[1]
+                    status = f"[dim]{count} anchor part(s) filtered[/dim]"
+                else:
+                    status = ""
                 table.add_row(
                     model.name,
                     f"({pos[0]:.1f}, {pos[1]:.1f}, {pos[2]:.1f})",
                     f"({rot[0]:.1f}, {rot[1]:.1f}, {rot[2]:.1f})",
                     f"{model.transform.scale:.2f}",
-                    "[yellow]anchor (skipped)[/yellow]" if is_anchor else "",
+                    status,
                 )
             console.print(table)
 

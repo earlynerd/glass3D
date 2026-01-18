@@ -51,26 +51,34 @@ class EngraveProgress:
 
 
 class CoordinateTransformer:
-    """Transform between model coordinates (mm) and galvo coordinates (16-bit)."""
-    
+    """Transform between model coordinates (mm) and galvo coordinates (16-bit).
+
+    Supports both centered coordinates (0,0 at field center) and corner-origin
+    coordinates (0,0 at field corner, matching slicer software).
+    """
+
     def __init__(
         self,
         field_size_mm: tuple[float, float],
         galvo_bits: int = 16,
         offset_mm: tuple[float, float] = (0.0, 0.0),
+        corner_origin: bool = True,
     ):
         """Initialize transformer.
-        
+
         Args:
             field_size_mm: Physical size of galvo field (x, y) in mm
             galvo_bits: Resolution of galvo DAC (typically 16)
-            offset_mm: Offset from field center in mm
+            offset_mm: Additional offset from field center in mm
+            corner_origin: If True, input coordinates use corner-origin (0,0 at corner).
+                          If False, input coordinates are centered (0,0 at field center).
         """
         self.field_size_mm = field_size_mm
         self.galvo_max = (2 ** galvo_bits) - 1
         self.galvo_center = 2 ** (galvo_bits - 1)
         self.offset_mm = offset_mm
-        
+        self.corner_origin = corner_origin
+
         # Conversion factors
         self.mm_to_galvo = (
             self.galvo_max / field_size_mm[0],
@@ -80,61 +88,87 @@ class CoordinateTransformer:
             field_size_mm[0] / self.galvo_max,
             field_size_mm[1] / self.galvo_max,
         )
+
+        # Corner-origin offset (converts corner-origin to centered)
+        if corner_origin:
+            self._origin_offset = (
+                -field_size_mm[0] / 2,
+                -field_size_mm[1] / 2,
+            )
+        else:
+            self._origin_offset = (0.0, 0.0)
     
     def mm_to_galvo_coords(self, x_mm: float, y_mm: float) -> tuple[int, int]:
         """Convert mm coordinates to galvo coordinates.
-        
+
         Args:
-            x_mm: X position in mm (0 = center of field)
-            y_mm: Y position in mm (0 = center of field)
-            
+            x_mm: X position in mm. If corner_origin=True, 0 = field corner.
+                  If corner_origin=False, 0 = field center.
+            y_mm: Y position in mm (same coordinate system as x_mm)
+
         Returns:
             Tuple of (x_galvo, y_galvo) as integers
         """
-        # Apply offset
+        # Convert corner-origin to centered if needed
+        x_mm = x_mm + self._origin_offset[0]
+        y_mm = y_mm + self._origin_offset[1]
+
+        # Apply additional user offset
         x_mm = x_mm + self.offset_mm[0]
         y_mm = y_mm + self.offset_mm[1]
-        
+
         # Convert to galvo units (centered at galvo_center)
         x_galvo = int(self.galvo_center + x_mm * self.mm_to_galvo[0])
         y_galvo = int(self.galvo_center + y_mm * self.mm_to_galvo[1])
-        
+
         return x_galvo, y_galvo
     
     def galvo_to_mm_coords(self, x_galvo: int, y_galvo: int) -> tuple[float, float]:
         """Convert galvo coordinates to mm.
-        
+
         Args:
             x_galvo: X galvo position
             y_galvo: Y galvo position
-            
+
         Returns:
-            Tuple of (x_mm, y_mm)
+            Tuple of (x_mm, y_mm) in the same coordinate system as input
+            (corner-origin if corner_origin=True, else centered)
         """
         x_mm = (x_galvo - self.galvo_center) * self.galvo_to_mm[0]
         y_mm = (y_galvo - self.galvo_center) * self.galvo_to_mm[1]
-        
-        # Remove offset
+
+        # Remove user offset
         x_mm = x_mm - self.offset_mm[0]
         y_mm = y_mm - self.offset_mm[1]
-        
+
+        # Convert back from centered to corner-origin if needed
+        x_mm = x_mm - self._origin_offset[0]
+        y_mm = y_mm - self._origin_offset[1]
+
         return x_mm, y_mm
     
     def is_in_bounds(self, x_mm: float, y_mm: float, margin_mm: float = 0.0) -> bool:
         """Check if mm coordinates are within galvo field.
-        
+
         Args:
-            x_mm: X position in mm
+            x_mm: X position in mm (in the same coordinate system as inputs)
             y_mm: Y position in mm
             margin_mm: Safety margin from edges
-            
+
         Returns:
             True if position is valid
         """
-        half_x = (self.field_size_mm[0] / 2) - margin_mm
-        half_y = (self.field_size_mm[1] / 2) - margin_mm
-        
-        return abs(x_mm) <= half_x and abs(y_mm) <= half_y
+        if self.corner_origin:
+            # Corner-origin: valid range is [margin, field_size - margin]
+            return (
+                margin_mm <= x_mm <= self.field_size_mm[0] - margin_mm
+                and margin_mm <= y_mm <= self.field_size_mm[1] - margin_mm
+            )
+        else:
+            # Centered: valid range is [-half + margin, half - margin]
+            half_x = (self.field_size_mm[0] / 2) - margin_mm
+            half_y = (self.field_size_mm[1] / 2) - margin_mm
+            return abs(x_mm) <= half_x and abs(y_mm) <= half_y
     
     def clamp_to_bounds(
         self,
@@ -143,21 +177,26 @@ class CoordinateTransformer:
         margin_mm: float = 0.0,
     ) -> tuple[float, float]:
         """Clamp mm coordinates to galvo field bounds.
-        
+
         Args:
             x_mm: X position in mm
             y_mm: Y position in mm
             margin_mm: Safety margin from edges
-            
+
         Returns:
             Clamped (x_mm, y_mm)
         """
-        half_x = (self.field_size_mm[0] / 2) - margin_mm
-        half_y = (self.field_size_mm[1] / 2) - margin_mm
-        
-        x_mm = max(-half_x, min(half_x, x_mm))
-        y_mm = max(-half_y, min(half_y, y_mm))
-        
+        if self.corner_origin:
+            # Corner-origin: clamp to [margin, field_size - margin]
+            x_mm = max(margin_mm, min(self.field_size_mm[0] - margin_mm, x_mm))
+            y_mm = max(margin_mm, min(self.field_size_mm[1] - margin_mm, y_mm))
+        else:
+            # Centered: clamp to [-half + margin, half - margin]
+            half_x = (self.field_size_mm[0] / 2) - margin_mm
+            half_y = (self.field_size_mm[1] / 2) - margin_mm
+            x_mm = max(-half_x, min(half_x, x_mm))
+            y_mm = max(-half_y, min(half_y, y_mm))
+
         return x_mm, y_mm
 
 
@@ -275,25 +314,35 @@ class LaserController:
     
     def validate_point_cloud(self, cloud: PointCloud) -> tuple[bool, list[str]]:
         """Validate that point cloud is safe to engrave.
-        
+
         Args:
             cloud: Point cloud to validate
-            
+
         Returns:
             Tuple of (is_valid, list_of_issues)
         """
         issues = []
         margin = self.config.machine.edge_margin_mm
-        
-        # Check XY bounds
+        field_size = self.config.machine.field_size_mm
+
+        # Check XY bounds (corner-origin: valid range is [margin, field_size - margin])
         min_pt, max_pt = cloud.bounds
-        half_field = np.array(self.config.machine.field_size_mm) / 2 - margin
-        
-        if abs(min_pt[0]) > half_field[0] or abs(max_pt[0]) > half_field[0]:
-            issues.append(f"X coordinates exceed field bounds (max ±{half_field[0]:.1f}mm)")
-        
-        if abs(min_pt[1]) > half_field[1] or abs(max_pt[1]) > half_field[1]:
-            issues.append(f"Y coordinates exceed field bounds (max ±{half_field[1]:.1f}mm)")
+        x_min_valid = margin
+        x_max_valid = field_size[0] - margin
+        y_min_valid = margin
+        y_max_valid = field_size[1] - margin
+
+        if min_pt[0] < x_min_valid or max_pt[0] > x_max_valid:
+            issues.append(
+                f"X coordinates out of bounds (valid range: {x_min_valid:.1f} to {x_max_valid:.1f}mm, "
+                f"got: {min_pt[0]:.1f} to {max_pt[0]:.1f}mm)"
+            )
+
+        if min_pt[1] < y_min_valid or max_pt[1] > y_max_valid:
+            issues.append(
+                f"Y coordinates out of bounds (valid range: {y_min_valid:.1f} to {y_max_valid:.1f}mm, "
+                f"got: {min_pt[1]:.1f} to {max_pt[1]:.1f}mm)"
+            )
         
         # Check Z bounds
         z_min, z_max = self.config.machine.z_range_mm

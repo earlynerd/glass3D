@@ -64,7 +64,7 @@ For multi-model workflows: **3MF Import → Scene Management → Combined Point 
 
 ### Scene Module (Multi-Model Support)
 
-- **`glass3d/scene/scene.py`**: `Scene` container for multiple models. `ModelPlacement` stores mesh reference + transform. `WorkspaceBounds` defines valid placement region (default 110x110x100mm).
+- **`glass3d/scene/scene.py`**: `Scene` container for multiple models. `ModelPlacement` stores mesh reference + transform. `WorkspaceBounds` defines valid placement region (default 0-110mm for X/Y, 0-100mm for Z, corner-origin to match slicer conventions).
 
 - **`glass3d/scene/transform.py`**: `Transform3D` with position (XYZ mm), rotation (XYZ Euler degrees), and uniform scale. Converts to/from 4x4 transformation matrices.
 
