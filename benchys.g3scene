@@ -1,0 +1,49 @@
+{
+  "name": "Benchyscape",
+  "version": "1.0",
+  "models": [
+    {
+      "id": "8e5bf35d",
+      "source_path": "3DBenchy.stl",
+      "name": "3DBenchy",
+      "transform": {
+        "position": [
+          0.0,
+          -7.152148460987107,
+          36.996096807667556
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "scale": 0.5
+      },
+      "strategy": null,
+      "point_spacing_mm": null,
+      "color": [
+        0.7,
+        0.7,
+        0.9
+      ],
+      "visible": true
+    }
+  ],
+  "workspace": {
+    "x_range": [
+      -55.0,
+      55.0
+    ],
+    "y_range": [
+      -55.0,
+      55.0
+    ],
+    "z_range": [
+      0.0,
+      100.0
+    ]
+  },
+  "default_strategy": "surface",
+  "default_point_spacing_mm": 0.1,
+  "default_layer_height_mm": 0.1
+}

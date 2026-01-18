@@ -7,6 +7,10 @@ Glass3D converts 3D models into point clouds and controls BJJCZ galvo lasers to 
 ## Features
 
 - Load 3D models from STL, OBJ, PLY, and other formats
+- **Multi-model scenes from slicer software** (PrusaSlicer, Cura, Bambu Studio)
+  - Import 3MF files with preserved positions, rotations, and scales
+  - Use familiar slicer UI for model arrangement
+  - Anchor system for floating parts
 - Multiple point cloud generation strategies:
   - **Surface**: Points on the mesh surface (shell effect)
   - **Solid**: Fill the entire volume
@@ -15,7 +19,7 @@ Glass3D converts 3D models into point clouds and controls BJJCZ galvo lasers to 
 - Direct control of BJJCZ galvo lasers via `galvoplotter`
 - Safety features: bounds validation, thermal management
 - Progress tracking and abort capability
-- Preview mode with red dot laser
+- Preview mode with workspace bounds visualization
 - CLI and programmatic API
 
 ## Installation
@@ -54,6 +58,33 @@ glass3d engrave model.stl --dry-run --mock
 # Actually engrave
 glass3d engrave model.stl --strategy surface --spacing 0.1 --max-size 50
 ```
+
+### Multi-Model Workflow (Recommended)
+
+Use your favorite 3D printer slicer to arrange multiple models, then export as 3MF:
+
+```bash
+# 1. Generate an anchor plate (for floating parts in slicer)
+glass3d generate-anchor -o anchor.stl
+
+# 2. In PrusaSlicer/Cura/Bambu Studio:
+#    - Create a custom printer with bed size matching your laser workspace (110x110mm)
+#    - Import anchor.stl and your models
+#    - Arrange models as desired (the anchor holds floating parts)
+#    - Name the anchor "anchor" in the slicer (right-click → Rename)
+#    - Export as 3MF
+
+# 3. View scene info (anchors are auto-detected and marked for skipping)
+glass3d info scene.3mf
+
+# 4. Preview with workspace bounds
+glass3d preview scene.3mf --max-points 100000
+
+# 5. Engrave (anchors are automatically excluded)
+glass3d engrave scene.3mf --mock --dry-run
+```
+
+Models with "anchor" anywhere in the name are automatically excluded from engraving.
 
 ### Python API
 

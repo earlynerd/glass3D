@@ -13,6 +13,7 @@ from .mesh.loader import MeshLoader, load_mesh
 from .mesh.slicer import MeshSlicer
 from .mesh.pointcloud_gen import get_strategy, list_strategies
 from .laser.controller import LaserController
+from .scene import Scene, ModelPlacement, WorkspaceBounds, Transform3D
 
 __all__ = [
     "Glass3DConfig",
@@ -23,4 +24,8 @@ __all__ = [
     "get_strategy",
     "list_strategies",
     "LaserController",
+    "Scene",
+    "ModelPlacement",
+    "WorkspaceBounds",
+    "Transform3D",
 ]

@@ -13,11 +13,11 @@
     "mark_delay": 100.0
   },
   "machine": {
-    "field_size_mm": [110.0, 110.0],
+    "field_size_mm": [50.0, 50.0],
     "galvo_bits": 16,
-    "z_range_mm": [0.0, 100.0],
-    "z_steps_per_mm": 100.0,
-    "edge_margin_mm": 2.0
+    "z_range_mm": [0.0, 150.0],
+    "z_steps_per_mm": 4096.0,
+    "edge_margin_mm": 1.0
   },
   "material": {
     "name": "K9 Borosilicate Glass",
@@ -29,8 +29,8 @@
     "thermal_pause_ms": 1000.0
   },
   "point_cloud": {
-    "point_spacing_mm": 0.1,
-    "layer_height_mm": 0.1,
+    "point_spacing_mm": 0.05,
+    "layer_height_mm": 0.05,
     "strategy": "surface",
     "surface_offset_mm": 0.0,
     "solid_density": 1.0

@@ -32,8 +32,12 @@ black glass3d
 
 # CLI commands (after install)
 glass3d info model.stl                              # View model info
+glass3d info scene.3mf                              # View 3MF scene info
 glass3d preview model.stl --strategy surface        # 3D visualization
+glass3d preview scene.3mf --max-points 100000       # Preview 3MF with workspace bounds
 glass3d engrave model.stl --mock --dry-run          # Test without hardware
+glass3d engrave scene.3mf --mock --dry-run          # Engrave 3MF scene
+glass3d generate-anchor -o anchor.stl               # Create anchor for slicer workflow
 glass3d init-config -o config.json -m k9            # Generate config
 glass3d test-connection --mock                      # Test laser connection
 ```
@@ -42,19 +46,32 @@ glass3d test-connection --mock                      # Test laser connection
 
 The codebase follows a pipeline: **Mesh Loading → Point Cloud Generation → Coordinate Transform → Laser Control**
 
+For multi-model workflows: **3MF Import → Scene Management → Combined Point Cloud → Laser Control**
+
 ### Core Components
 
-- **`glass3D/core/config.py`**: Pydantic models for all configuration (laser params, machine params, material settings). `Glass3DConfig` is the main container with nested models like `LaserParams`, `MachineParams`, `MaterialParams`.
+- **`glass3d/core/config.py`**: Pydantic models for all configuration (laser params, machine params, material settings). `Glass3DConfig` is the main container with nested models like `LaserParams`, `MachineParams`, `MaterialParams`.
 
-- **`glass3D/core/point_cloud.py`**: `PointCloud` dataclass wrapping numpy arrays. Stores Nx3 points with optional intensities and layer indices. Provides transformations (translate, scale, sort_by_z) and I/O (save_xyz, save_npz).
+- **`glass3d/core/point_cloud.py`**: `PointCloud` dataclass wrapping numpy arrays. Stores Nx3 points with optional intensities and layer indices. Provides transformations (translate, scale, sort_by_z) and I/O (save_xyz, save_npz).
 
-- **`glass3D/mesh/loader.py`**: `MeshLoader` wraps trimesh for loading STL/OBJ/PLY. Provides center_at_origin(), scale_to_fit(), repair() for mesh preparation.
+- **`glass3d/mesh/loader.py`**: `MeshLoader` wraps trimesh for loading STL/OBJ/PLY. Provides center_at_origin(), scale_to_fit(), repair() for mesh preparation.
 
-- **`glass3D/mesh/pointcloud_gen.py`**: Point generation strategies. Use `get_strategy(name)` to get a strategy, then `strategy.generate(mesh, config)` to create point clouds.
+- **`glass3d/mesh/pointcloud_gen.py`**: Point generation strategies. Use `get_strategy(name)` to get a strategy, then `strategy.generate(mesh, config)` to create point clouds.
 
-- **`glass3D/laser/controller.py`**: `LaserController` wraps galvoplotter with safety checks. `CoordinateTransformer` converts mm coordinates to 16-bit galvo coordinates (0x0000-0xFFFF, center at 0x8000).
+- **`glass3d/laser/controller.py`**: `LaserController` wraps galvoplotter with safety checks. `CoordinateTransformer` converts mm coordinates to 16-bit galvo coordinates (0x0000-0xFFFF, center at 0x8000).
 
-- **`glass3D/cli.py`**: Click-based CLI using Rich for output formatting.
+- **`glass3d/cli.py`**: Click-based CLI using Rich for output formatting.
+
+### Scene Module (Multi-Model Support)
+
+- **`glass3d/scene/scene.py`**: `Scene` container for multiple models. `ModelPlacement` stores mesh reference + transform. `WorkspaceBounds` defines valid placement region (default 110x110x100mm).
+
+- **`glass3d/scene/transform.py`**: `Transform3D` with position (XYZ mm), rotation (XYZ Euler degrees), and uniform scale. Converts to/from 4x4 transformation matrices.
+
+Key methods:
+- `Scene.from_3mf(path)` - Load 3MF file from slicer software (PrusaSlicer, Cura, etc.)
+- `Scene.to_combined_point_cloud(params)` - Generate merged point cloud from all models
+- `Scene.is_anchor_model(name)` - Check if model should be skipped (contains "anchor" in name)
 
 ### Coordinate Systems
 
@@ -108,3 +125,27 @@ glass3d engrave model.stl --mock --dry-run
 1. Create class in `glass3d/mesh/pointcloud_gen.py` implementing `generate(mesh, config) -> PointCloud`
 2. Register in `STRATEGIES` dict in same file
 3. Strategy names: "surface", "solid", "grayscale", "contour"
+
+## Multi-Model 3MF Workflow
+
+The recommended workflow for multiple models uses 3D printer slicer software for arrangement:
+
+1. **Generate anchor**: `glass3d generate-anchor -o anchor.stl` creates a small plate for anchoring floating parts
+2. **Set up slicer**: Create a custom printer profile with bed size = laser workspace (110x110mm)
+3. **Arrange models**: Import anchor + models into slicer, position as desired
+4. **Name anchors**: Any model with "anchor" in the name is auto-excluded from engraving
+5. **Export 3MF**: Slicer preserves positions, rotations, scales
+6. **Engrave**: `glass3d engrave scene.3mf` loads all models and generates combined point cloud
+
+### 3MF Metadata Extraction
+
+PrusaSlicer stores model names in `Metadata/Slic3r_PE_model.config` (not in the main 3D model file). The `Scene.from_3mf()` method extracts these names so anchor detection works correctly.
+
+### Anchor Detection
+
+Models are skipped if "anchor" appears anywhere in their name (case-insensitive):
+- `anchor` ✓
+- `my_anchor_plate` ✓
+- `Assembly1_anchor` ✓
+
+This allows anchors to work even when models are grouped into assemblies in the slicer.
