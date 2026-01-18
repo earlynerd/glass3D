@@ -1,0 +1,49 @@
+{
+  "laser": {
+    "power": 50.0,
+    "frequency": 30.0,
+    "pulse_width": 4.0,
+    "q_switch_period": 50.0,
+    "point_dwell_ms": 0.5
+  },
+  "speed": {
+    "mark_speed": 500.0,
+    "travel_speed": 2000.0,
+    "jump_delay": 100.0,
+    "mark_delay": 100.0
+  },
+  "machine": {
+    "field_size_mm": [110.0, 110.0],
+    "galvo_bits": 16,
+    "z_range_mm": [0.0, 100.0],
+    "z_steps_per_mm": 100.0,
+    "edge_margin_mm": 2.0
+  },
+  "material": {
+    "name": "K9 Borosilicate Glass",
+    "refractive_index": 1.5168,
+    "recommended_power": [40.0, 60.0],
+    "min_point_spacing_mm": 0.05,
+    "max_point_spacing_mm": 0.3,
+    "max_continuous_points": 10000,
+    "thermal_pause_ms": 1000.0
+  },
+  "point_cloud": {
+    "point_spacing_mm": 0.1,
+    "layer_height_mm": 0.1,
+    "strategy": "surface",
+    "surface_offset_mm": 0.0,
+    "solid_density": 1.0
+  },
+  "engrave": {
+    "center_in_field": true,
+    "z_offset_mm": 5.0,
+    "engrave_direction": "bottom_up",
+    "optimize_path": true,
+    "chunk_size": 1000,
+    "dry_run": false,
+    "validate_bounds": true
+  },
+  "settings_file": null,
+  "mock_laser": false
+}
