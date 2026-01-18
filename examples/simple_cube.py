@@ -34,9 +34,10 @@ def main():
     # Create test geometry
     print("\n1. Creating test cube...")
     mesh = create_test_cube(20.0)  # 20mm cube
-    
-    # Center at origin
+
+    # Center XY at origin, but place bottom at Z=5mm (inside glass)
     mesh.vertices -= mesh.centroid
+    mesh.vertices[:, 2] += 15  # Shift up so Z ranges from 5 to 25mm
     
     print(f"   Mesh: {len(mesh.vertices)} vertices, {len(mesh.faces)} faces")
     print(f"   Size: {mesh.extents}")
@@ -60,9 +61,9 @@ def main():
     valid, issues = controller.validate_point_cloud(cloud)
     
     if valid:
-        print("   ✓ Point cloud is valid")
+        print("   [OK] Point cloud is valid")
     else:
-        print("   ✗ Issues found:")
+        print("   [X] Issues found:")
         for issue in issues:
             print(f"     - {issue}")
     
@@ -81,10 +82,10 @@ def main():
                 progress_callback=progress_callback,
                 dry_run=True,  # Preview only
             )
-        print("\n   ✓ Engrave complete!")
-        
+        print("\n   [OK] Engrave complete!")
+
     except Exception as e:
-        print(f"\n   ✗ Error: {e}")
+        print(f"\n   [X] Error: {e}")
     
     print("\n" + "=" * 40)
     print("Done! In real usage, set config.mock_laser = False")

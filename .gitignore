@@ -1,0 +1,7 @@
+/.pytest_cache
+*.stl
+*.egg-info
+/venv
+*/__pycache__
+*.pyc
+/.claude

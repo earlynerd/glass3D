@@ -190,8 +190,8 @@ class LaserController:
             return
         
         try:
-            from galvoplotter import GalvoController
-            
+            from galvo import GalvoController
+
             if self.config.mock_laser:
                 logger.info("Using mock laser connection")
                 self._controller = GalvoController(mock=True)
@@ -209,7 +209,7 @@ class LaserController:
             
         except ImportError:
             raise RuntimeError(
-                "galvoplotter not installed. Install with: pip install galvoplotter"
+                "galvoplotter not installed. Install with: pip install galvoplotter (imports as 'galvo')"
             )
         except Exception as e:
             raise RuntimeError(f"Failed to connect to laser: {e}")

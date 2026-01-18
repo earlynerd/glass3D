@@ -2,7 +2,7 @@
 
 **Subsurface Laser Engraving Software for 3D Glass/Crystal Engravings**
 
-Glass3D converts 3D models into point clouds and controls BJJCZ galvo lasers to create stunning 3D images inside glass blocks using subsurface laser engraving (SSLE).
+Glass3D converts 3D models into point clouds and controls BJJCZ galvo lasers to engrave 3D images inside glass blocks using subsurface laser engraving (SSLE).
 
 ## Features
 
