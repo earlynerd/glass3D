@@ -17,11 +17,83 @@ from typing import TYPE_CHECKING, Callable, Iterator
 import numpy as np
 from numpy.typing import NDArray
 
+from ..core.config import LensCorrection
+
 if TYPE_CHECKING:
     from ..core.config import Glass3DConfig
     from ..core.point_cloud import PointCloud
 
 logger = logging.getLogger(__name__)
+
+
+def _apply_lens_correction(
+    x_norm: float,
+    y_norm: float,
+    correction: LensCorrection,
+) -> tuple[float, float]:
+    """Apply lens distortion correction to normalized coordinates.
+
+    Coordinates should be in range [-1, 1] representing the galvo field.
+    Corrections are applied in order: mirror → rotation → scale → skew → trapezoid → bulge
+
+    Args:
+        x_norm: Normalized X coordinate (-1 to 1)
+        y_norm: Normalized Y coordinate (-1 to 1)
+        correction: Lens correction parameters
+
+    Returns:
+        Corrected (x_norm, y_norm)
+    """
+    x, y = x_norm, y_norm
+
+    # 1. Mirror
+    if correction.mirror_x:
+        x = -x
+    if correction.mirror_y:
+        y = -y
+
+    # 2. Field rotation
+    if correction.field_angle_deg != 0:
+        angle_rad = np.radians(correction.field_angle_deg)
+        cos_a = np.cos(angle_rad)
+        sin_a = np.sin(angle_rad)
+        x, y = x * cos_a - y * sin_a, x * sin_a + y * cos_a
+
+    # 3. Scale (per-axis calibration)
+    x = x * correction.x_axis.scale
+    y = y * correction.y_axis.scale
+
+    # 4. Sign (axis direction)
+    x = x * correction.x_axis.sign
+    y = y * correction.y_axis.sign
+
+    # 5. Skew correction (parallelogram distortion)
+    # Skew affects the perpendicularity of axes
+    if correction.x_axis.skew != 1.0:
+        x = x + (correction.x_axis.skew - 1.0) * y
+    if correction.y_axis.skew != 1.0:
+        y = y + (correction.y_axis.skew - 1.0) * x
+
+    # 6. Trapezoid correction (keystone)
+    # Applies position-dependent scaling
+    if correction.x_axis.trapezoid != 1.0:
+        trap_factor = 1.0 + (correction.x_axis.trapezoid - 1.0) * y
+        x = x * trap_factor
+    if correction.y_axis.trapezoid != 1.0:
+        trap_factor = 1.0 + (correction.y_axis.trapezoid - 1.0) * x
+        y = y * trap_factor
+
+    # 7. Bulge correction (barrel/pincushion distortion)
+    # Radial distortion based on distance from center
+    r_squared = x * x + y * y
+    if correction.x_axis.bulge != 1.0:
+        bulge_factor = 1.0 + (correction.x_axis.bulge - 1.0) * r_squared
+        x = x * bulge_factor
+    if correction.y_axis.bulge != 1.0:
+        bulge_factor = 1.0 + (correction.y_axis.bulge - 1.0) * r_squared
+        y = y * bulge_factor
+
+    return x, y
 
 
 def optimize_path_nearest_neighbor(
@@ -107,6 +179,8 @@ class CoordinateTransformer:
 
     Supports both centered coordinates (0,0 at field center) and corner-origin
     coordinates (0,0 at field corner, matching slicer software).
+
+    Optionally applies lens distortion correction when LensCorrection is provided.
     """
 
     def __init__(
@@ -115,6 +189,7 @@ class CoordinateTransformer:
         galvo_bits: int = 16,
         offset_mm: tuple[float, float] = (0.0, 0.0),
         corner_origin: bool = True,
+        lens_correction: LensCorrection | None = None,
     ):
         """Initialize transformer.
 
@@ -124,12 +199,14 @@ class CoordinateTransformer:
             offset_mm: Additional offset from field center in mm
             corner_origin: If True, input coordinates use corner-origin (0,0 at corner).
                           If False, input coordinates are centered (0,0 at field center).
+            lens_correction: Optional lens distortion correction parameters
         """
         self.field_size_mm = field_size_mm
         self.galvo_max = (2 ** galvo_bits) - 1
         self.galvo_center = 2 ** (galvo_bits - 1)
         self.offset_mm = offset_mm
         self.corner_origin = corner_origin
+        self.lens_correction = lens_correction
 
         # Conversion factors
         self.mm_to_galvo = (
@@ -168,6 +245,25 @@ class CoordinateTransformer:
         # Apply additional user offset
         x_mm = x_mm + self.offset_mm[0]
         y_mm = y_mm + self.offset_mm[1]
+
+        # Apply lens correction if enabled
+        if self.lens_correction is not None and self.lens_correction.enabled:
+            # Apply field offset from lens correction
+            x_mm = x_mm + self.lens_correction.field_offset_mm[0]
+            y_mm = y_mm + self.lens_correction.field_offset_mm[1]
+
+            # Normalize to [-1, 1] range for distortion correction
+            half_x = self.field_size_mm[0] / 2
+            half_y = self.field_size_mm[1] / 2
+            x_norm = x_mm / half_x
+            y_norm = y_mm / half_y
+
+            # Apply distortion correction
+            x_norm, y_norm = _apply_lens_correction(x_norm, y_norm, self.lens_correction)
+
+            # Convert back to mm
+            x_mm = x_norm * half_x
+            y_mm = y_norm * half_y
 
         # Convert to galvo units (centered at galvo_center)
         x_galvo = int(self.galvo_center + x_mm * self.mm_to_galvo[0])
@@ -266,10 +362,15 @@ class LaserController:
         self._connected = False
         self._abort_requested = False
         
-        # Initialize coordinate transformer
+        # Initialize coordinate transformer with lens correction if configured
+        lens_correction = config.machine.lens_correction
+        if lens_correction.enabled:
+            logger.info("Lens correction enabled")
+
         self.transformer = CoordinateTransformer(
             field_size_mm=config.machine.field_size_mm,
             galvo_bits=config.machine.galvo_bits,
+            lens_correction=lens_correction if lens_correction.enabled else None,
         )
         
         # Z-axis state

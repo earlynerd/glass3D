@@ -634,6 +634,121 @@ def init_config(output: str, material: str) -> None:
         raise click.Abort()
 
 
+@main.command("import-device")
+@click.argument("device_file", type=click.Path(exists=True))
+@click.option(
+    "--output", "-o",
+    type=click.Path(),
+    default=None,
+    help="Output path for config file (if not specified, just shows device info)",
+)
+@click.option(
+    "--base-config", "-b",
+    type=click.Path(exists=True),
+    default=None,
+    help="Base config file to merge with (preserves laser/material settings)",
+)
+def import_device(device_file: str, output: str | None, base_config: str | None) -> None:
+    """Import device settings from a LightBurn export file.
+
+    DEVICE_FILE: Path to LightBurn export (.lbzip) file
+
+    This imports lens correction parameters, workspace size, and other
+    device-specific settings from LightBurn's device export format.
+
+    To export from LightBurn:
+      1. Edit > Device Settings
+      2. Click "Export" button
+      3. Save as .lbzip file
+
+    Examples:
+        # Show device info only
+        glass3d import-device uvlaser_50mm.lbzip
+
+        # Create new config file with device settings
+        glass3d import-device uvlaser_50mm.lbzip -o config.json
+
+        # Merge with existing config (preserves laser/material settings)
+        glass3d import-device uvlaser_50mm.lbzip -b existing.json -o updated.json
+    """
+    from .device import load_lightburn_device
+
+    console.print(f"\n[bold]Import LightBurn Device[/bold]\n")
+
+    try:
+        device = load_lightburn_device(device_file)
+    except Exception as e:
+        console.print(f"[red]Error loading device file: {e}[/red]")
+        raise click.Abort()
+
+    # Display device info
+    table = Table(title=f"Device: {device.name}")
+    table.add_column("Property", style="cyan")
+    table.add_column("Value", style="green")
+
+    table.add_row("Name", device.name)
+    table.add_row("Type", device.device_type)
+    table.add_row("Workspace Size", f"{device.width_mm} x {device.height_mm} mm")
+    table.add_row("Mirror X/Y", f"{device.mirror_x} / {device.mirror_y}")
+    table.add_row("Field Angle", f"{device.field_angle}°")
+    table.add_row("Field Offset", f"({device.field_offset_x}, {device.field_offset_y}) mm")
+    console.print(table)
+
+    # Lens correction table
+    console.print()
+    lens_table = Table(title="Lens Correction Parameters")
+    lens_table.add_column("Parameter", style="cyan")
+    lens_table.add_column("X Axis (Galvo 2)" if not device.galvo_1_is_x else "X Axis (Galvo 1)", style="green")
+    lens_table.add_column("Y Axis (Galvo 1)" if not device.galvo_1_is_x else "Y Axis (Galvo 2)", style="yellow")
+
+    if device.galvo_1_is_x:
+        x_vals = (device.galvo_1_scale, device.galvo_1_bulge, device.galvo_1_trapezoid, device.galvo_1_skew, device.galvo_1_sign)
+        y_vals = (device.galvo_2_scale, device.galvo_2_bulge, device.galvo_2_trapezoid, device.galvo_2_skew, device.galvo_2_sign)
+    else:
+        x_vals = (device.galvo_2_scale, device.galvo_2_bulge, device.galvo_2_trapezoid, device.galvo_2_skew, device.galvo_2_sign)
+        y_vals = (device.galvo_1_scale, device.galvo_1_bulge, device.galvo_1_trapezoid, device.galvo_1_skew, device.galvo_1_sign)
+
+    lens_table.add_row("Scale", f"{x_vals[0]:.6f}", f"{y_vals[0]:.6f}")
+    lens_table.add_row("Bulge", f"{x_vals[1]:.6f}", f"{y_vals[1]:.6f}")
+    lens_table.add_row("Trapezoid", f"{x_vals[2]:.6f}", f"{y_vals[2]:.6f}")
+    lens_table.add_row("Skew", f"{x_vals[3]:.6f}", f"{y_vals[3]:.6f}")
+    lens_table.add_row("Sign", f"{x_vals[4]}", f"{y_vals[4]}")
+    console.print(lens_table)
+
+    # Speed/laser info
+    console.print()
+    speed_table = Table(title="Speed & Laser Defaults")
+    speed_table.add_column("Property", style="cyan")
+    speed_table.add_column("Value", style="green")
+    speed_table.add_row("Max Speed", f"{device.max_speed} mm/s")
+    speed_table.add_row("Jump Speed", f"{device.default_jump_speed} mm/s")
+    speed_table.add_row("Frame Speed", f"{device.frame_speed} mm/s")
+    speed_table.add_row("Frequency Range", f"{device.laser_min_freq} - {device.laser_max_freq} kHz")
+    console.print(speed_table)
+
+    # Save config if output specified
+    if output:
+        console.print()
+
+        # Load base config or create default
+        if base_config:
+            base_cfg = Glass3DConfig.from_file(base_config)
+            console.print(f"[dim]Merging with base config: {base_config}[/dim]")
+        else:
+            base_cfg = Glass3DConfig.default()
+
+        # Convert device to config
+        cfg = device.to_config(base_cfg)
+
+        # Save
+        cfg.to_file(output)
+        console.print(f"\n[green]Created config file: {output}[/green]")
+        console.print(f"Workspace: {cfg.machine.field_size_mm[0]} x {cfg.machine.field_size_mm[1]} mm")
+        console.print(f"Lens correction: [bold green]enabled[/bold green]")
+    else:
+        console.print("\n[dim]Use -o/--output to save as config file[/dim]")
+
+
 @main.command("generate-anchor")
 @click.option(
     "--output", "-o",

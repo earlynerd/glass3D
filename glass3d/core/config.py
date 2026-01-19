@@ -38,15 +38,65 @@ class SpeedParams(BaseModel):
     mark_delay: float = Field(default=100.0, ge=0, description="Delay after mark in microseconds")
 
 
+class GalvoAxisCorrection(BaseModel):
+    """Lens correction parameters for a single galvo axis.
+
+    These parameters compensate for optical distortions in the F-theta lens.
+    Values are typically calibrated using LightBurn or EzCad software.
+    """
+
+    scale: float = Field(default=1.0, description="Scale factor for this axis")
+    bulge: float = Field(default=1.0, description="Barrel/pincushion distortion (>1 = pincushion)")
+    trapezoid: float = Field(default=1.0, description="Keystone correction factor")
+    skew: float = Field(default=1.0, description="Parallelogram distortion correction")
+    sign: int = Field(default=1, ge=-1, le=1, description="Axis direction (+1 or -1)")
+
+
+class LensCorrection(BaseModel):
+    """Lens distortion correction parameters.
+
+    F-theta lenses introduce various distortions that need compensation:
+    - Barrel/pincushion: radial distortion from lens curvature
+    - Trapezoid: keystone effect from non-perpendicular mounting
+    - Skew: parallelogram distortion from mirror alignment
+    - Scale: calibration for actual vs expected field size
+
+    These can be imported from LightBurn device exports (.lbzip files).
+    """
+
+    enabled: bool = Field(default=False, description="Enable lens correction")
+
+    # Per-axis correction (LightBurn uses Galvo_1 for Y, Galvo_2 for X typically)
+    x_axis: GalvoAxisCorrection = Field(default_factory=GalvoAxisCorrection)
+    y_axis: GalvoAxisCorrection = Field(default_factory=GalvoAxisCorrection)
+
+    # Field rotation and offset
+    field_angle_deg: float = Field(default=0.0, description="Field rotation in degrees")
+    field_offset_mm: tuple[float, float] = Field(
+        default=(0.0, 0.0),
+        description="Field offset from center (x, y) in mm"
+    )
+
+    # Mirror settings
+    mirror_x: bool = Field(default=False, description="Mirror X axis")
+    mirror_y: bool = Field(default=False, description="Mirror Y axis")
+
+
 class MachineParams(BaseModel):
     """Physical machine parameters."""
-    
+
     # Galvo field parameters
     field_size_mm: tuple[float, float] = Field(
         default=(110.0, 110.0),
         description="Physical size of galvo field in mm (x, y)"
     )
     galvo_bits: int = Field(default=16, description="Resolution of galvo DAC")
+
+    # Lens correction
+    lens_correction: LensCorrection = Field(
+        default_factory=LensCorrection,
+        description="F-theta lens distortion correction"
+    )
     
     # Z-axis parameters
     z_range_mm: tuple[float, float] = Field(
