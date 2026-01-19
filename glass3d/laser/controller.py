@@ -438,14 +438,34 @@ class LaserController:
             raise InterruptedError("Operation aborted by user")
     
     def _apply_laser_params(self) -> None:
-        """Apply laser parameters from config."""
+        """Apply laser and timing parameters from config."""
         if not self._controller:
             return
-        
-        params = self.config.laser
+
+        laser = self.config.laser
+        speed = self.config.speed
+
+        # Set laser parameters
         self._controller.set(
-            power=params.power,
-            frequency=params.frequency,
+            power=laser.power,
+            frequency=laser.frequency,
+        )
+
+        # Set speed parameters
+        self._controller.travel_speed = speed.travel_speed
+        self._controller.mark_speed = speed.mark_speed
+
+        # Set timing delays (galvo settling and laser timing compensation)
+        self._controller.delay_jump_short = speed.jump_delay_min
+        self._controller.delay_jump_long = speed.jump_delay_max
+        self._controller.delay_laser_on = speed.laser_on_delay
+        self._controller.delay_laser_off = speed.laser_off_delay
+        self._controller.delay_polygon = speed.polygon_delay
+
+        logger.debug(
+            f"Applied timing: travel={speed.travel_speed}mm/s, "
+            f"jump_delay={speed.jump_delay_min}-{speed.jump_delay_max}µs, "
+            f"laser_on/off={speed.laser_on_delay}/{speed.laser_off_delay}µs"
         )
     
     def _mm_to_z_steps(self, z_mm: float) -> int:

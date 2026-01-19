@@ -715,9 +715,9 @@ def import_device(device_file: str, output: str | None, base_config: str | None)
     lens_table.add_row("Sign", f"{x_vals[4]}", f"{y_vals[4]}")
     console.print(lens_table)
 
-    # Speed/laser info
+    # Speed info
     console.print()
-    speed_table = Table(title="Speed & Laser Defaults")
+    speed_table = Table(title="Speed Defaults")
     speed_table.add_column("Property", style="cyan")
     speed_table.add_column("Value", style="green")
     speed_table.add_row("Max Speed", f"{device.max_speed} mm/s")
@@ -725,6 +725,19 @@ def import_device(device_file: str, output: str | None, base_config: str | None)
     speed_table.add_row("Frame Speed", f"{device.frame_speed} mm/s")
     speed_table.add_row("Frequency Range", f"{device.laser_min_freq} - {device.laser_max_freq} kHz")
     console.print(speed_table)
+
+    # Timing info
+    console.print()
+    timing_table = Table(title="Galvo Timing")
+    timing_table.add_column("Property", style="cyan")
+    timing_table.add_column("Value", style="green")
+    timing_table.add_row("Jump Delay (short)", f"{device.jump_delay_min} µs")
+    timing_table.add_row("Jump Delay (long)", f"{device.jump_delay_max} µs")
+    timing_table.add_row("Jump Distance Threshold", f"{device.jump_distance_threshold} mm")
+    timing_table.add_row("Laser On Delay", f"{device.laser_on_delay} µs")
+    timing_table.add_row("Laser Off Delay", f"{device.laser_off_delay} µs")
+    timing_table.add_row("Polygon Delay", f"{device.polygon_delay} µs")
+    console.print(timing_table)
 
     # Save config if output specified
     if output:

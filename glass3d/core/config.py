@@ -31,11 +31,19 @@ class LaserParams(BaseModel):
 
 class SpeedParams(BaseModel):
     """Movement speed parameters."""
-    
+
     mark_speed: float = Field(default=500.0, ge=1, le=10000, description="Speed while marking in mm/s")
     travel_speed: float = Field(default=2000.0, ge=1, le=10000, description="Speed while traveling in mm/s")
-    jump_delay: float = Field(default=100.0, ge=0, description="Delay after jump in microseconds")
-    mark_delay: float = Field(default=100.0, ge=0, description="Delay after mark in microseconds")
+
+    # Jump delays (settling time after galvo move completes)
+    jump_delay_min: float = Field(default=200.0, ge=0, description="Min delay after short jumps (µs)")
+    jump_delay_max: float = Field(default=400.0, ge=0, description="Max delay after long jumps (µs)")
+    jump_distance_threshold: float = Field(default=10.0, ge=0, description="Distance threshold for long jump delay (mm)")
+
+    # Laser timing compensation
+    laser_on_delay: float = Field(default=100.0, ge=0, description="Delay before laser fires (µs)")
+    laser_off_delay: float = Field(default=100.0, ge=0, description="Delay after laser stops (µs)")
+    polygon_delay: float = Field(default=100.0, ge=0, description="Delay at polygon corners (µs)")
 
 
 class GalvoAxisCorrection(BaseModel):

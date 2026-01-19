@@ -56,10 +56,18 @@ class LightBurnDevice:
     mirror_x: bool
     mirror_y: bool
 
-    # Speed/timing defaults
+    # Speed defaults
     max_speed: float
     default_jump_speed: float
     frame_speed: float
+
+    # Timing parameters (microseconds)
+    jump_delay_min: float
+    jump_delay_max: float
+    jump_distance_threshold: float
+    laser_on_delay: float
+    laser_off_delay: float
+    polygon_delay: float
 
     # Laser settings
     laser_min_freq: float
@@ -103,6 +111,13 @@ class LightBurnDevice:
             max_speed=float(settings.get("MaxSpeed", 7000)),
             default_jump_speed=float(settings.get("Default_JumpSpeed", 4000)),
             frame_speed=float(settings.get("FrameSpeed", 4000)),
+            # Timing (all in microseconds)
+            jump_delay_min=float(settings.get("Default_MinJumpDelay", 200)),
+            jump_delay_max=float(settings.get("Default_MaxJumpDelay", 400)),
+            jump_distance_threshold=float(settings.get("Default_MaxJumpDistance", 10)),
+            laser_on_delay=float(settings.get("Default_LaserOn_TC", 100)),
+            laser_off_delay=float(settings.get("Default_LaserOff_TC", 100)),
+            polygon_delay=float(settings.get("Default_Polygon_TC", 100)),
             # Laser
             laser_min_freq=float(settings.get("Laser_MinFreq", 1)),
             laser_max_freq=float(settings.get("Laser_MaxFreq", 80)),
@@ -180,12 +195,16 @@ class LightBurnDevice:
 
         updated_machine = MachineParams.model_validate(machine_dict)
 
-        # Update speed params with imported defaults
+        # Update speed params with imported timing values
         speed = SpeedParams(
             travel_speed=self.default_jump_speed,
             mark_speed=base_config.speed.mark_speed,
-            jump_delay=base_config.speed.jump_delay,
-            mark_delay=base_config.speed.mark_delay,
+            jump_delay_min=self.jump_delay_min,
+            jump_delay_max=self.jump_delay_max,
+            jump_distance_threshold=self.jump_distance_threshold,
+            laser_on_delay=self.laser_on_delay,
+            laser_off_delay=self.laser_off_delay,
+            polygon_delay=self.polygon_delay,
         )
 
         return Glass3DConfig(
