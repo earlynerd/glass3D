@@ -195,17 +195,31 @@ class PointCloudParams(BaseModel):
     )
     
     # Generation strategy
-    strategy: Literal["surface", "solid", "grayscale", "contour"] = Field(
+    strategy: Literal["surface", "solid", "grayscale", "contour", "shell"] = Field(
         default="surface",
         description="Point generation strategy"
     )
-    
+
     # Surface strategy options
     surface_offset_mm: float = Field(
         default=0.0,
         description="Offset from actual surface (negative = inside)"
     )
-    
+
+    # Shell strategy options
+    shell_count: int = Field(
+        default=3,
+        ge=1,
+        le=20,
+        description="Number of shells/walls (1 = surface only)"
+    )
+    shell_spacing_mm: float = Field(
+        default=0.15,
+        ge=0.05,
+        le=2.0,
+        description="Distance between shells in mm"
+    )
+
     # Solid strategy options
     solid_density: float = Field(
         default=1.0,

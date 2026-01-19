@@ -641,16 +641,18 @@ class LaserController:
         cloud: PointCloud,
         progress_callback: Callable[[EngraveProgress], None] | None = None,
         dry_run: bool = False,
+        live_preview: bool = False,
     ) -> None:
         """Engrave a point cloud.
-        
+
         Points are engraved in order (caller should pre-sort).
         For SSLE, points should be sorted bottom-up (ascending Z).
-        
+
         Args:
             cloud: Point cloud to engrave
             progress_callback: Optional callback for progress updates
             dry_run: If True, simulate without firing laser
+            live_preview: If True, show matplotlib preview updated per layer
         """
         if not self._connected:
             self.connect()
@@ -665,17 +667,26 @@ class LaserController:
         
         # Reset abort flag
         self._abort_requested = False
-        
+
         # Apply parameters
         self._apply_laser_params()
-        
+
         total_points = len(cloud)
         completed = 0
         start_time = time.time()
-        
+
         chunk_size = self.config.engrave.chunk_size
         dwell_ms = self.config.laser.point_dwell_ms
-        
+
+        # Initialize live preview if requested
+        preview = None
+        if live_preview:
+            from .preview import LivePreview
+            preview = LivePreview(
+                field_size_mm=self.config.machine.field_size_mm,
+                title="Engraving Preview" + (" (Dry Run)" if dry_run else ""),
+            )
+
         logger.info(f"Starting engrave: {total_points} points")
         
         try:
@@ -710,6 +721,16 @@ class LaserController:
                         time.sleep(z_settle_ms / 1000.0)
 
                     logger.debug(f"Layer {layer_idx}: Z={layer_z:.3f}mm, {len(layer_points)} points")
+
+                    # Update live preview at start of each layer
+                    if preview is not None:
+                        preview.update(
+                            current_layer_points=layer_points,
+                            layer_idx=layer_idx,
+                            total_layers=total_layers,
+                            completed_points=completed,
+                            total_points=total_points,
+                        )
 
                     # Optimize XY path within this layer
                     if optimize_xy and len(layer_points) > 2:
@@ -758,18 +779,26 @@ class LaserController:
                     if len(layer_points) > 0:
                         last_xy = (float(layer_points[-1, 0]), float(layer_points[-1, 1]))
 
+                    # Mark layer as complete for preview
+                    if preview is not None:
+                        preview.mark_layer_complete(layer_points)
+
             # Wait for completion
             self._controller.wait_for_machine_idle()
             
             elapsed = time.time() - start_time
             logger.info(f"Engrave complete: {total_points} points in {elapsed:.1f}s")
-            
+
         except InterruptedError:
             logger.warning("Engrave aborted by user")
             raise
         except Exception as e:
             logger.error(f"Engrave failed: {e}")
             raise
+        finally:
+            # Always close preview window
+            if preview is not None:
+                preview.close()
     
     def preview_bounds(self, cloud: PointCloud) -> None:
         """Preview the bounding box with the red dot laser.

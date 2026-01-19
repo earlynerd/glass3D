@@ -273,9 +273,120 @@ class GrayscaleStrategy(BaseStrategy):
         return filtered
 
 
+class ShellStrategy(BaseStrategy):
+    """Generate points on the surface and multiple inner shells.
+
+    Creates a thicker, more solid appearance by generating points on
+    the outer surface plus configurable inner shells offset inward.
+    Similar to "walls" or "perimeters" in 3D printing.
+    """
+
+    @property
+    def name(self) -> str:
+        return "shell"
+
+    @property
+    def description(self) -> str:
+        return "Surface plus inner shells (configurable wall count)"
+
+    def generate(
+        self,
+        mesh: trimesh.Trimesh,
+        params: PointCloudParams,
+    ) -> PointCloud:
+        """Generate points on surface and inner shells."""
+        all_points = []
+        all_layers = []
+
+        shell_count = params.shell_count
+        shell_spacing = params.shell_spacing_mm
+
+        # Calculate points per shell based on surface area
+        surface_area = mesh.area
+        points_per_area = 1.0 / (params.point_spacing_mm ** 2)
+        base_num_points = int(surface_area * points_per_area)
+
+        for shell_idx in range(shell_count):
+            offset = shell_idx * shell_spacing
+
+            if shell_idx == 0:
+                # Outermost shell - use original mesh
+                shell_mesh = mesh
+                num_points = base_num_points
+            else:
+                # Inner shells - offset mesh inward
+                shell_mesh = self._offset_mesh(mesh, -offset)
+                if shell_mesh is None or shell_mesh.area < 0.01:
+                    # Mesh collapsed or became invalid, stop adding shells
+                    break
+                # Scale points by area ratio (inner shells are smaller)
+                area_ratio = shell_mesh.area / surface_area
+                num_points = max(100, int(base_num_points * area_ratio))
+
+            # Sample points on this shell
+            if num_points > 0:
+                try:
+                    points, _ = shell_mesh.sample(num_points, return_index=True)
+
+                    # Assign layer indices based on Z
+                    z_min = points[:, 2].min()
+                    layer_indices = ((points[:, 2] - z_min) / params.layer_height_mm).astype(np.int32)
+
+                    all_points.append(points)
+                    all_layers.append(layer_indices)
+                except Exception:
+                    # Sampling failed (degenerate mesh), skip this shell
+                    continue
+
+        if not all_points:
+            return PointCloud(points=np.empty((0, 3)))
+
+        points = np.vstack(all_points)
+        layer_indices = np.concatenate(all_layers)
+
+        return PointCloud(points=points, layer_indices=layer_indices)
+
+    def _offset_mesh(
+        self,
+        mesh: trimesh.Trimesh,
+        offset: float,
+    ) -> trimesh.Trimesh | None:
+        """Offset mesh by moving vertices along their normals.
+
+        Args:
+            mesh: Original mesh
+            offset: Distance to offset (negative = inward)
+
+        Returns:
+            Offset mesh copy, or None if offset fails
+        """
+        import trimesh
+
+        try:
+            # Create a copy of the mesh
+            offset_mesh = mesh.copy()
+
+            # Get vertex normals (average of adjacent face normals)
+            vertex_normals = offset_mesh.vertex_normals
+
+            # Move vertices along their normals
+            offset_mesh.vertices = offset_mesh.vertices + vertex_normals * offset
+
+            # Check if mesh is still valid (not self-intersecting badly)
+            # Simple check: ensure we still have positive volume
+            if offset_mesh.is_watertight and offset_mesh.volume < 0:
+                # Mesh turned inside out, flip it
+                offset_mesh.invert()
+
+            return offset_mesh
+
+        except Exception:
+            return None
+
+
 class ContourStrategy(BaseStrategy):
     """Generate points along contour lines only.
-    
+
     Creates a "topographic map" effect with distinct layer outlines.
     """
     
@@ -386,6 +497,7 @@ STRATEGIES: dict[str, type[BaseStrategy]] = {
     "solid": SolidStrategy,
     "grayscale": GrayscaleStrategy,
     "contour": ContourStrategy,
+    "shell": ShellStrategy,
 }
 
 

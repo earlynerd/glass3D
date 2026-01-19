@@ -196,7 +196,7 @@ def _load_and_generate_point_cloud(
 )
 @click.option(
     "--strategy", "-s",
-    type=click.Choice(["surface", "solid", "grayscale", "contour"]),
+    type=click.Choice(["surface", "solid", "grayscale", "contour", "shell"]),
     default="surface",
     help="Point generation strategy",
 )
@@ -211,6 +211,18 @@ def _load_and_generate_point_cloud(
     type=float,
     default=0.1,
     help="Layer height in mm",
+)
+@click.option(
+    "--shells",
+    type=int,
+    default=None,
+    help="Number of shells for 'shell' strategy (default: 3)",
+)
+@click.option(
+    "--shell-spacing",
+    type=float,
+    default=None,
+    help="Distance between shells in mm for 'shell' strategy (default: 0.15)",
 )
 @click.option(
     "--scale",
@@ -239,6 +251,11 @@ def _load_and_generate_point_cloud(
     type=click.Path(),
     help="Save point cloud to file (skip engraving)",
 )
+@click.option(
+    "--live-preview",
+    is_flag=True,
+    help="Show live matplotlib preview (updates per layer)",
+)
 @click.pass_context
 def engrave(
     ctx: click.Context,
@@ -247,11 +264,14 @@ def engrave(
     strategy: str,
     spacing: float,
     layer_height: float,
+    shells: int | None,
+    shell_spacing: float | None,
     scale: float,
     max_size: float | None,
     dry_run: bool,
     mock: bool,
     output: str | None,
+    live_preview: bool,
 ) -> None:
     """Engrave a 3D model or scene into glass.
 
@@ -271,8 +291,13 @@ def engrave(
     cfg.point_cloud.layer_height_mm = layer_height
     # Cast validated Click choice to Literal type
     cfg.point_cloud.strategy = cast(
-        Literal["surface", "solid", "grayscale", "contour"], strategy
+        Literal["surface", "solid", "grayscale", "contour", "shell"], strategy
     )
+    # Shell strategy options
+    if shells is not None:
+        cfg.point_cloud.shell_count = shells
+    if shell_spacing is not None:
+        cfg.point_cloud.shell_spacing_mm = shell_spacing
     cfg.engrave.dry_run = dry_run
 
     console.print(f"\n[bold]Glass3D Engraver[/bold]\n")
@@ -338,8 +363,9 @@ def engrave(
                     cloud,
                     progress_callback=update_progress,
                     dry_run=dry_run,
+                    live_preview=live_preview,
                 )
-            
+
             console.print("\n[bold green]Engrave complete![/bold green]")
             
         except InterruptedError:
@@ -358,7 +384,7 @@ def engrave(
 )
 @click.option(
     "--strategy", "-s",
-    type=click.Choice(["surface", "solid", "grayscale", "contour"]),
+    type=click.Choice(["surface", "solid", "grayscale", "contour", "shell"]),
     default="surface",
     help="Point generation strategy",
 )
@@ -405,7 +431,7 @@ def preview(
     cfg.point_cloud.point_spacing_mm = spacing
     # Cast validated Click choice to Literal type
     cfg.point_cloud.strategy = cast(
-        Literal["surface", "solid", "grayscale", "contour"], strategy
+        Literal["surface", "solid", "grayscale", "contour", "shell"], strategy
     )
 
     # Get workspace bounds from config's machine params
@@ -1048,12 +1074,18 @@ def scene_info(scene_file: str) -> None:
     is_flag=True,
     help="Use mock laser connection (for testing)",
 )
+@click.option(
+    "--live-preview",
+    is_flag=True,
+    help="Show live matplotlib preview (updates per layer)",
+)
 def scene_engrave(
     scene_file: str,
     config: str | None,
     output: str | None,
     dry_run: bool,
     mock: bool,
+    live_preview: bool,
 ) -> None:
     """Engrave all models in a scene.
 
@@ -1149,6 +1181,7 @@ def scene_engrave(
                     cloud,
                     progress_callback=update_progress,
                     dry_run=dry_run,
+                    live_preview=live_preview,
                 )
 
             console.print("\n[bold green]Engrave complete![/bold green]")
