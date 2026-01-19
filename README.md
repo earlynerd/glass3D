@@ -153,6 +153,53 @@ Edit the JSON file to match your machine parameters:
 }
 ```
 
+## Importing LightBurn Device Settings
+
+If you use LightBurn, you can import your calibrated device settings including lens correction parameters. This ensures Glass3D uses the same workspace size and distortion correction as LightBurn.
+
+### Exporting from LightBurn
+
+1. Open LightBurn
+2. Go to **Edit → Device Settings**
+3. Click the **Export** button
+4. Save as `.lbzip` file
+
+### Importing into Glass3D
+
+```bash
+# View device info (no changes made)
+glass3d import-device my_laser.lbzip
+
+# Create a new config file with device settings
+glass3d import-device my_laser.lbzip -o config.json
+
+# Merge with existing config (preserves your laser/material settings)
+glass3d import-device my_laser.lbzip -b existing_config.json -o updated_config.json
+```
+
+### What Gets Imported
+
+| Setting | Description |
+|---------|-------------|
+| Workspace Size | Field dimensions in mm |
+| Lens Correction | Scale, bulge, trapezoid, skew per axis |
+| Mirror X/Y | Axis inversion settings |
+| Field Angle | Rotation offset |
+| Field Offset | X/Y offset from center |
+| Travel Speed | Default jump speed |
+
+### Lens Correction
+
+F-theta lenses introduce optical distortions that need compensation for accurate positioning. LightBurn's calibration values correct for:
+
+- **Scale**: Size calibration per axis
+- **Bulge**: Barrel/pincushion distortion (radial)
+- **Trapezoid**: Keystone correction
+- **Skew**: Parallelogram distortion
+- **Mirror**: Axis direction inversion
+
+When you import a device, lens correction is automatically enabled in the config. The corrections are applied during coordinate transformation before sending positions to the galvo.
+
 ## Safety
 
 ⚠️ **LASER SAFETY IS CRITICAL** ⚠️
