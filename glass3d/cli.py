@@ -54,6 +54,83 @@ def _is_3mf_file(path: str) -> bool:
     return Path(path).suffix.lower() == ".3mf"
 
 
+def _estimate_engrave_time(cloud: PointCloud, cfg: Glass3DConfig) -> float:
+    """Estimate total engrave time in seconds.
+
+    Accounts for:
+    - Point dwell time
+    - Average travel time between points
+    - Jump delays (settling time)
+    - Laser on/off delays
+    - Z-axis settling per layer
+    - Thermal pauses
+
+    Args:
+        cloud: Point cloud to engrave
+        cfg: Configuration with timing parameters
+
+    Returns:
+        Estimated time in seconds
+    """
+    import numpy as np
+
+    num_points = len(cloud)
+    if num_points == 0:
+        return 0.0
+
+    # Time components (all in seconds)
+    dwell_time_per_point = cfg.laser.point_dwell_ms / 1000.0
+
+    # Average jump delay (use midpoint of min/max)
+    avg_jump_delay = (cfg.speed.jump_delay_min + cfg.speed.jump_delay_max) / 2.0 / 1_000_000.0
+
+    # Laser on/off delays (per point)
+    laser_delay = (cfg.speed.laser_on_delay + cfg.speed.laser_off_delay) / 1_000_000.0
+
+    # Estimate average travel distance between points
+    # Use a sample to avoid computing all pairwise distances
+    points = cloud.points
+    if num_points > 1000:
+        sample_idx = np.random.choice(num_points, 1000, replace=False)
+        sample = points[sample_idx]
+    else:
+        sample = points
+
+    # Compute distances between consecutive points in sample
+    if len(sample) > 1:
+        diffs = np.diff(sample[:, :2], axis=0)  # XY only
+        distances = np.linalg.norm(diffs, axis=1)
+        avg_distance_mm = float(np.mean(distances))
+    else:
+        avg_distance_mm = 1.0  # Fallback
+
+    # Travel time per point
+    travel_time_per_point = avg_distance_mm / cfg.speed.travel_speed
+
+    # Per-point time
+    time_per_point = (
+        dwell_time_per_point
+        + travel_time_per_point
+        + avg_jump_delay
+        + laser_delay
+    )
+
+    # Total point time
+    total_point_time = num_points * time_per_point
+
+    # Z-axis settling time (per layer)
+    num_layers = cloud.num_layers
+    z_settle_time = num_layers * (cfg.machine.z_axis_settle_ms / 1000.0)
+
+    # Thermal pauses
+    thermal_pause_count = num_points // cfg.material.max_continuous_points
+    thermal_pause_time = thermal_pause_count * (cfg.material.thermal_pause_ms / 1000.0)
+
+    total_time = total_point_time + z_settle_time + thermal_pause_time
+
+    return total_time
+
+
 def _load_and_generate_point_cloud(
     model_path: str,
     cfg: Glass3DConfig,
@@ -328,16 +405,18 @@ def engrave(
         console.print(f"[green]Saved {len(cloud):,} points[/green]")
         return
     
-    # Estimate time
-    points_per_second = 1000 / cfg.laser.point_dwell_ms  # Rough estimate
-    est_seconds = len(cloud) / points_per_second
-    console.print(f"\n[yellow]Estimated time: {est_seconds/60:.1f} minutes[/yellow]")
-    
+    # Estimate time (accounting for travel, delays, thermal pauses)
+    est_seconds = _estimate_engrave_time(cloud, cfg)
+    if est_seconds < 60:
+        console.print(f"\n[yellow]Estimated time: {est_seconds:.0f} seconds[/yellow]")
+    else:
+        console.print(f"\n[yellow]Estimated time: {est_seconds/60:.1f} minutes[/yellow]")
+
     if not mock and not dry_run:
         if not click.confirm("\nProceed with engraving?"):
             console.print("[red]Aborted[/red]")
             return
-    
+
     # Engrave
     console.print(f"\n[bold green]{'DRY RUN - ' if dry_run else ''}Starting engrave...[/bold green]\n")
     
@@ -1146,10 +1225,12 @@ def scene_engrave(
         console.print(f"[green]Saved {len(cloud):,} points[/green]")
         return
 
-    # Estimate time
-    points_per_second = 1000 / cfg.laser.point_dwell_ms
-    est_seconds = len(cloud) / points_per_second
-    console.print(f"\n[yellow]Estimated time: {est_seconds/60:.1f} minutes[/yellow]")
+    # Estimate time (accounting for travel, delays, thermal pauses)
+    est_seconds = _estimate_engrave_time(cloud, cfg)
+    if est_seconds < 60:
+        console.print(f"\n[yellow]Estimated time: {est_seconds:.0f} seconds[/yellow]")
+    else:
+        console.print(f"\n[yellow]Estimated time: {est_seconds/60:.1f} minutes[/yellow]")
 
     if not mock and not dry_run:
         if not click.confirm("\nProceed with engraving?"):
