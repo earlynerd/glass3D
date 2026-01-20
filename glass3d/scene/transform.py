@@ -64,28 +64,66 @@ class Transform3D(BaseModel):
         return t @ r @ s
 
     @classmethod
-    def from_matrix(cls, matrix: NDArray[np.float64]) -> Transform3D:
+    def from_matrix(
+        cls,
+        matrix: NDArray[np.float64],
+        scale_tolerance: float = 0.01,
+    ) -> Transform3D:
         """Create Transform3D from a 4x4 transformation matrix.
 
-        Note: This assumes the matrix represents uniform scaling.
-        Non-uniform scaling will be approximated.
+        This method only supports matrices with uniform scaling and proper
+        rotations (no reflections). For matrices with non-uniform scaling,
+        reflections, or other unsupported transforms, a ValueError is raised.
 
         Args:
             matrix: 4x4 homogeneous transformation matrix
+            scale_tolerance: Relative tolerance for uniform scale check
 
         Returns:
             Transform3D instance
-        """
-        # Extract translation
-        position = tuple(matrix[:3, 3].tolist())
 
-        # Extract scale (from the length of the first column of rotation part)
-        scale = float(np.linalg.norm(matrix[:3, 0]))
+        Raises:
+            ValueError: If matrix contains reflection, non-uniform scaling,
+                       zero scaling, or other unsupported transforms
+        """
+        rot_part = matrix[:3, :3]
+
+        # Check for reflection (negative determinant)
+        det = np.linalg.det(rot_part)
+        if det < 0:
+            raise ValueError(
+                "Matrix contains a reflection (negative determinant). "
+                "Transform3D only supports proper rotations."
+            )
+
+        # Extract scale from each column
+        scales = np.array([np.linalg.norm(rot_part[:, i]) for i in range(3)])
+
+        # Check for zero scale
+        if np.any(scales < 1e-10):
+            raise ValueError(
+                f"Matrix contains zero or near-zero scale: {scales}. "
+                "Transform3D requires positive scaling."
+            )
+
+        # Check for uniform scale
+        mean_scale = np.mean(scales)
+        if not np.allclose(scales, mean_scale, rtol=scale_tolerance):
+            raise ValueError(
+                f"Matrix contains non-uniform scaling: X={scales[0]:.4f}, "
+                f"Y={scales[1]:.4f}, Z={scales[2]:.4f}. "
+                "Transform3D only supports uniform scaling."
+            )
+
+        scale = float(mean_scale)
 
         # Extract rotation (normalize the rotation part)
-        rot_matrix = matrix[:3, :3] / scale
+        rot_matrix = rot_part / scale
         rot = Rotation.from_matrix(rot_matrix)
         rotation = tuple(rot.as_euler('xyz', degrees=True).tolist())
+
+        # Extract translation
+        position = tuple(matrix[:3, 3].tolist())
 
         return cls(position=position, rotation=rotation, scale=scale)
 

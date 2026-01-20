@@ -1,0 +1,20 @@
+{
+  "job_id": "218f7060",
+  "created_at": "2026-01-19T18:37:30.894301",
+  "updated_at": "2026-01-19T18:38:20.191089",
+  "source_file": "C:\\Users\\mmsyl\\Documents\\glass3D\\test.3mf",
+  "point_cloud_hash": "5a8f5dc1e13af146",
+  "total_points": 126819,
+  "completed_points": 65100,
+  "current_layer": 60,
+  "total_layers": 211,
+  "layer_start_point_index": 65100,
+  "config_snapshot": {
+    "power": 50.0,
+    "frequency": 30.0,
+    "point_dwell_ms": 0.5,
+    "dry_run": false
+  },
+  "status": "in_progress",
+  "error_message": null
+}

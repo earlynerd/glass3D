@@ -364,8 +364,11 @@ class Scene(BaseModel):
         # Load 3MF using trimesh (returns a Scene for multi-object files)
         loaded = trimesh.load(str(path))
 
-        # Try to extract model names from slicer metadata
-        name_map = cls._extract_slicer_names(path)
+        # Try to extract volume info from slicer metadata (includes face ranges)
+        volume_info = cls._extract_slicer_volume_info(path)
+
+        # Fall back to simple name map if no volume info
+        name_map = cls._extract_slicer_names(path) if not volume_info else {}
 
         # Create scene with workspace bounds
         scene = cls(
@@ -383,19 +386,83 @@ class Scene(BaseModel):
             )
         elif isinstance(loaded, trimesh.Scene):
             # Multi-object scene - extract each geometry with its transform
-            scene._load_from_trimesh_scene(loaded, str(path), name_map)
+            scene._load_from_trimesh_scene(loaded, str(path), name_map, volume_info)
         else:
             raise ValueError(f"Unexpected type from trimesh.load: {type(loaded)}")
 
         return scene
 
     @staticmethod
+    def _extract_slicer_volume_info(path: Path) -> dict[str, list[dict[str, Any]]]:
+        """Extract volume info from slicer-specific metadata in 3MF file.
+
+        3MF files from PrusaSlicer/Slic3r store model names and volume
+        information in a separate config file (Metadata/Slic3r_PE_model.config).
+        When models are added as subparts in the slicer, each object contains
+        multiple volumes that need to be split.
+
+        Args:
+            path: Path to the 3MF file
+
+        Returns:
+            Dict mapping object IDs to list of volume info dicts.
+            Each volume dict has: name, firstid, lastid, matrix (optional)
+        """
+        import zipfile
+        import xml.etree.ElementTree as ET
+
+        volume_info: dict[str, list[dict[str, Any]]] = {}
+
+        try:
+            with zipfile.ZipFile(path, 'r') as zf:
+                # Try PrusaSlicer/Slic3r format
+                if 'Metadata/Slic3r_PE_model.config' in zf.namelist():
+                    content = zf.read('Metadata/Slic3r_PE_model.config').decode('utf-8')
+                    root = ET.fromstring(content)
+
+                    for obj in root.findall('object'):
+                        obj_id = obj.get('id')
+                        if not obj_id:
+                            continue
+
+                        volumes: list[dict[str, Any]] = []
+                        for vol in obj.findall('volume'):
+                            vol_data: dict[str, Any] = {
+                                'firstid': int(vol.get('firstid', 0)),
+                                'lastid': int(vol.get('lastid', 0)),
+                            }
+
+                            # Extract volume metadata
+                            for meta in vol.findall('metadata'):
+                                key = meta.get('key')
+                                value = meta.get('value')
+                                if key == 'name':
+                                    vol_data['name'] = value
+                                elif key == 'matrix':
+                                    # Parse 4x4 matrix from space-separated string
+                                    # Matrix is stored row-major (standard order)
+                                    vals = [float(x) for x in value.split()]
+                                    if len(vals) == 16:
+                                        mat = np.array(vals).reshape(4, 4)
+                                        vol_data['matrix'] = mat
+
+                            volumes.append(vol_data)
+
+                        if volumes:
+                            volume_info[obj_id] = volumes
+
+        except Exception:
+            # If metadata extraction fails, fall back to no volume info
+            pass
+
+        return volume_info
+
+    @staticmethod
     def _extract_slicer_names(path: Path) -> dict[str, str]:
         """Extract model names from slicer-specific metadata in 3MF file.
 
-        3MF files from PrusaSlicer/Slic3r store model names in a separate
-        config file (Metadata/Slic3r_PE_model.config) rather than in the
-        main 3D model file.
+        This is a simplified version that just returns object-level names.
+        For full volume support, use _extract_slicer_volume_info instead.
 
         Args:
             path: Path to the 3MF file
@@ -435,6 +502,7 @@ class Scene(BaseModel):
         tm_scene: trimesh.Scene,
         source_path: str,
         name_map: dict[str, str] | None = None,
+        volume_info: dict[str, list[dict[str, Any]]] | None = None,
     ) -> None:
         """Load models from a trimesh Scene object.
 
@@ -442,9 +510,12 @@ class Scene(BaseModel):
             tm_scene: trimesh Scene containing geometries and transforms
             source_path: Original file path for reference
             name_map: Optional mapping from object IDs to display names
+            volume_info: Optional mapping from object IDs to volume info (for splitting)
         """
         if name_map is None:
             name_map = {}
+        if volume_info is None:
+            volume_info = {}
 
         # Get the scene graph to access transforms
         graph = tm_scene.graph
@@ -453,7 +524,7 @@ class Scene(BaseModel):
         # Each node in the graph can reference a geometry with a transform
         for node_name in graph.nodes_geometry:
             # Get the geometry name and transform for this node
-            transform_matrix, geometry_name = graph.get(node_name)
+            object_transform, geometry_name = graph.get(node_name)
 
             # Get the actual mesh
             geometry = tm_scene.geometry.get(geometry_name)
@@ -464,24 +535,98 @@ class Scene(BaseModel):
             if not isinstance(geometry, trimesh.Trimesh):
                 continue
 
-            # Extract transform components from the 4x4 matrix
-            transform = Transform3D.from_matrix(transform_matrix)
+            # Check if we have volume info for this object (multiple subparts)
+            volumes = volume_info.get(node_name) or volume_info.get(geometry_name)
 
-            # Create model placement
-            # Try to get name from slicer metadata, fall back to node/geometry name
-            display_name = name_map.get(node_name) or name_map.get(geometry_name)
-            if not display_name:
-                display_name = node_name if node_name != geometry_name else geometry_name
+            if volumes and len(volumes) > 1:
+                # Split mesh into separate volumes and add each
+                self._add_split_volumes(
+                    geometry, volumes, object_transform, source_path
+                )
+            else:
+                # Single mesh - try to decompose the transform
+                # If decomposition fails (reflection, non-uniform scale, etc.),
+                # apply the transform directly to the mesh vertices
+                try:
+                    transform = Transform3D.from_matrix(object_transform)
+                    mesh_to_store = geometry.copy()
+                except ValueError:
+                    # Transform can't be represented in Transform3D
+                    # Apply it directly to mesh vertices instead
+                    mesh_to_store = geometry.copy()
+                    mesh_to_store.apply_transform(object_transform)
+                    transform = Transform3D()
+
+                # Get name from volume info, name_map, or fall back to node/geometry name
+                if volumes and len(volumes) == 1:
+                    display_name = volumes[0].get('name', geometry_name)
+                else:
+                    display_name = name_map.get(node_name) or name_map.get(geometry_name)
+                    if not display_name:
+                        display_name = node_name if node_name != geometry_name else geometry_name
+
+                model = ModelPlacement(
+                    source_path=source_path,
+                    name=display_name,
+                    transform=transform,
+                )
+
+                # Store the mesh (already copied, with transform baked in if needed)
+                model._mesh = mesh_to_store
+
+                self.models.append(model)
+
+    def _add_split_volumes(
+        self,
+        merged_mesh: trimesh.Trimesh,
+        volumes: list[dict[str, Any]],
+        object_transform: np.ndarray,
+        source_path: str,
+    ) -> None:
+        """Split a merged mesh into separate volumes and add each as a model.
+
+        When PrusaSlicer adds models as subparts of an object, trimesh loads
+        them as a single merged mesh. This method uses the face range info
+        from the slicer config to split them back into separate models.
+
+        Args:
+            merged_mesh: The merged mesh containing all volumes
+            volumes: List of volume info dicts with name, firstid, lastid, matrix
+            object_transform: The object-level transform from the scene graph
+            source_path: Original file path for reference
+        """
+        for vol in volumes:
+            name = vol.get('name', 'unnamed')
+            first_face = vol.get('firstid', 0)
+            last_face = vol.get('lastid', len(merged_mesh.faces) - 1)
+
+            # Extract faces for this volume
+            face_mask = np.zeros(len(merged_mesh.faces), dtype=bool)
+            face_mask[first_face:last_face + 1] = True
+
+            # Create submesh with only these faces
+            submesh = merged_mesh.submesh([face_mask], append=True)
+
+            # NOTE: trimesh already applies volume-level transforms when loading 3MF,
+            # so we only need to apply the object-level transform here.
+            # The vol_matrix from slicer config is for reference/metadata only.
+
+            # Try to decompose the object transform
+            # If it fails (reflection, non-uniform scale, etc.), apply directly to mesh
+            try:
+                transform = Transform3D.from_matrix(object_transform)
+            except ValueError:
+                # Transform can't be represented in Transform3D
+                # Apply it directly to mesh vertices instead
+                submesh.apply_transform(object_transform)
+                transform = Transform3D()
 
             model = ModelPlacement(
                 source_path=source_path,
-                name=display_name,
+                name=name,
                 transform=transform,
             )
-
-            # Store the actual mesh data for later use
-            # We need to store the base geometry (without scene transform)
-            model._mesh = geometry.copy()
+            model._mesh = submesh
 
             self.models.append(model)
 
