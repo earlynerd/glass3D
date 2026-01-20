@@ -18,6 +18,10 @@ Glass3D converts 3D models into point clouds and controls BJJCZ galvo lasers to 
   - **Contour**: Points along layer contours only
 - Direct control of BJJCZ galvo lasers via `galvoplotter`
 - Safety features: bounds validation, thermal management
+- **Fault-tolerant engraving** with checkpoint/resume capability
+  - Automatic checkpoints at layer boundaries
+  - Resume after power outages, crashes, or aborts
+  - Job management CLI (`glass3d jobs list/show/clean`)
 - Progress tracking and abort capability
 - Preview mode with workspace bounds visualization
 - CLI and programmatic API
@@ -85,6 +89,31 @@ glass3d engrave scene.3mf --mock --dry-run
 ```
 
 Models with "anchor" anywhere in the name are automatically excluded from engraving.
+
+### Fault Recovery (Checkpoints)
+
+Long engrave jobs can take hours. Glass3D automatically saves checkpoints at layer boundaries, so you can resume after interruptions:
+
+```bash
+# Start an engrave (checkpoints enabled by default)
+glass3d engrave model.stl --strategy surface --spacing 0.1
+
+# If power fails or you abort (Ctrl+C), you'll see:
+#   Checkpoint saved: ./glass3d_checkpoints/checkpoint_abc12345.json
+#   Resume with: glass3d engrave model.stl --resume abc12345
+
+# Resume from where you left off
+glass3d engrave model.stl --resume abc12345
+
+# List all saved checkpoints
+glass3d jobs list
+
+# View details of a checkpoint
+glass3d jobs show abc12345
+
+# Clean up completed checkpoints
+glass3d jobs clean
+```
 
 ### Python API
 

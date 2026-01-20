@@ -20,6 +20,7 @@ from rich.logging import RichHandler
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 from rich.table import Table
 
+from .core.checkpoint import CheckpointData, CheckpointManager
 from .core.config import Glass3DConfig
 from .core.point_cloud import PointCloud
 from .mesh.loader import MeshLoader
@@ -333,6 +334,23 @@ def _load_and_generate_point_cloud(
     is_flag=True,
     help="Show live matplotlib preview (updates per layer)",
 )
+@click.option(
+    "--resume", "-r",
+    type=str,
+    default=None,
+    help="Resume from checkpoint (job ID or path to checkpoint file)",
+)
+@click.option(
+    "--checkpoint-dir",
+    type=click.Path(),
+    default=None,
+    help="Directory for checkpoint files (default: ./glass3d_checkpoints)",
+)
+@click.option(
+    "--no-checkpoint",
+    is_flag=True,
+    help="Disable checkpoint saving (not recommended for long jobs)",
+)
 @click.pass_context
 def engrave(
     ctx: click.Context,
@@ -349,6 +367,9 @@ def engrave(
     mock: bool,
     output: str | None,
     live_preview: bool,
+    resume: str | None,
+    checkpoint_dir: str | None,
+    no_checkpoint: bool,
 ) -> None:
     """Engrave a 3D model or scene into glass.
 
@@ -396,18 +417,47 @@ def engrave(
     if output:
         output_path = Path(output)
         console.print(f"\n[cyan]Saving point cloud to {output_path}...[/cyan]")
-        
+
         if output_path.suffix == ".npz":
             cloud.save_npz(str(output_path))
         else:
             cloud.save_xyz(str(output_path))
-        
+
         console.print(f"[green]Saved {len(cloud):,} points[/green]")
         return
-    
+
+    # --- Checkpoint setup ---
+    checkpoint_mgr: CheckpointManager | None = None
+    resume_ckpt: CheckpointData | None = None
+
+    if not no_checkpoint:
+        checkpoint_mgr = CheckpointManager(checkpoint_dir)
+
+        if resume:
+            # Load and validate checkpoint
+            try:
+                resume_ckpt = checkpoint_mgr.load(resume)
+                valid, error = checkpoint_mgr.validate_for_resume(resume_ckpt, cloud)
+                if not valid:
+                    console.print(f"[bold red]Cannot resume: {error}[/bold red]")
+                    raise click.Abort()
+
+                console.print(f"\n[cyan]Resuming job {resume_ckpt.job_id}[/cyan]")
+                console.print(f"  Progress: {resume_ckpt.completed_points:,}/{resume_ckpt.total_points:,} points ({resume_ckpt.percent_complete:.1f}%)")
+                console.print(f"  Starting from layer {resume_ckpt.current_layer + 1}/{resume_ckpt.total_layers}")
+            except FileNotFoundError:
+                console.print(f"[bold red]Checkpoint not found: {resume}[/bold red]")
+                raise click.Abort()
+
     # Estimate time (accounting for travel, delays, thermal pauses)
     est_seconds = _estimate_engrave_time(cloud, cfg)
-    if est_seconds < 60:
+
+    # Adjust estimate for resumed jobs
+    if resume_ckpt:
+        remaining_fraction = 1.0 - (resume_ckpt.completed_points / resume_ckpt.total_points)
+        est_seconds = est_seconds * remaining_fraction
+        console.print(f"\n[yellow]Estimated remaining time: {est_seconds/60:.1f} minutes[/yellow]")
+    elif est_seconds < 60:
         console.print(f"\n[yellow]Estimated time: {est_seconds:.0f} seconds[/yellow]")
     else:
         console.print(f"\n[yellow]Estimated time: {est_seconds/60:.1f} minutes[/yellow]")
@@ -418,8 +468,9 @@ def engrave(
             return
 
     # Engrave
-    console.print(f"\n[bold green]{'DRY RUN - ' if dry_run else ''}Starting engrave...[/bold green]\n")
-    
+    action = "Resuming" if resume_ckpt else "Starting"
+    console.print(f"\n[bold green]{'DRY RUN - ' if dry_run else ''}{action} engrave...[/bold green]\n")
+
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -428,29 +479,54 @@ def engrave(
         console=console,
     ) as progress:
         task = progress.add_task("Engraving...", total=len(cloud))
-        
+
+        # Set initial progress for resumed jobs
+        if resume_ckpt:
+            progress.update(task, completed=resume_ckpt.completed_points)
+
         def update_progress(p: EngraveProgress) -> None:
             progress.update(
                 task,
                 completed=p.completed_points,
                 description=f"Layer {p.current_layer + 1}/{p.total_layers}",
             )
-        
+
+        final_checkpoint: CheckpointData | None = None
         try:
             with LaserController(cfg) as laser:
-                laser.engrave_point_cloud(
+                final_checkpoint = laser.engrave_point_cloud(
                     cloud,
                     progress_callback=update_progress,
                     dry_run=dry_run,
                     live_preview=live_preview,
+                    checkpoint_manager=checkpoint_mgr,
+                    resume_checkpoint=resume_ckpt,
+                    source_file=str(Path(model_path).resolve()),
                 )
 
             console.print("\n[bold green]Engrave complete![/bold green]")
-            
+            if final_checkpoint and checkpoint_mgr:
+                console.print(f"[dim]Job {final_checkpoint.job_id} finished[/dim]")
+
         except InterruptedError:
             console.print("\n[bold yellow]Engrave aborted[/bold yellow]")
+            if checkpoint_mgr:
+                # Find the checkpoint that was just saved
+                resumable = checkpoint_mgr.find_resumable(str(Path(model_path).resolve()))
+                if resumable:
+                    ckpt = resumable[0]
+                    ckpt_path = checkpoint_mgr.checkpoint_path(ckpt.job_id)
+                    console.print(f"[cyan]Checkpoint saved: {ckpt_path}[/cyan]")
+                    console.print(f"[cyan]Resume with: glass3d engrave {model_path} --resume {ckpt.job_id}[/cyan]")
         except Exception as e:
             console.print(f"\n[bold red]Error: {e}[/bold red]")
+            if checkpoint_mgr:
+                # Find the most recent checkpoint for this source
+                resumable = checkpoint_mgr.find_resumable(str(Path(model_path).resolve()))
+                if resumable:
+                    ckpt = resumable[0]
+                    console.print(f"[cyan]Checkpoint available: {ckpt.job_id} ({ckpt.percent_complete:.1f}% complete)[/cyan]")
+                    console.print(f"[cyan]Resume with: glass3d engrave {model_path} --resume {ckpt.job_id}[/cyan]")
             raise click.Abort()
 
 
@@ -959,6 +1035,191 @@ def test_connection(mock: bool) -> None:
 
 
 # -----------------------------------------------------------------------------
+# Job/Checkpoint commands
+# -----------------------------------------------------------------------------
+
+@main.group()
+def jobs() -> None:
+    """Manage engrave job checkpoints for fault recovery."""
+    pass
+
+
+@jobs.command("list")
+@click.option(
+    "--checkpoint-dir",
+    type=click.Path(),
+    default=None,
+    help="Directory for checkpoint files (default: ./glass3d_checkpoints)",
+)
+@click.option(
+    "--all", "-a", "show_all",
+    is_flag=True,
+    help="Show all checkpoints (including completed)",
+)
+def jobs_list(checkpoint_dir: str | None, show_all: bool) -> None:
+    """List saved job checkpoints."""
+    mgr = CheckpointManager(checkpoint_dir)
+    checkpoints = mgr.list_checkpoints()
+
+    if not checkpoints:
+        console.print("[dim]No checkpoints found[/dim]")
+        console.print(f"[dim]Checkpoint directory: {mgr.checkpoint_dir}[/dim]")
+        return
+
+    if not show_all:
+        checkpoints = [c for c in checkpoints if c.is_resumable]
+
+    if not checkpoints:
+        console.print("[dim]No resumable checkpoints (use --all to see completed jobs)[/dim]")
+        return
+
+    table = Table(title="Job Checkpoints")
+    table.add_column("Job ID", style="cyan")
+    table.add_column("Status", style="yellow")
+    table.add_column("Progress", style="green")
+    table.add_column("Source", style="dim")
+    table.add_column("Updated", style="dim")
+
+    for ckpt in checkpoints:
+        status_style = {
+            "in_progress": "yellow",
+            "completed": "green",
+            "aborted": "red",
+        }.get(ckpt.status, "white")
+
+        source = Path(ckpt.source_file).name if ckpt.source_file else "-"
+        progress = f"{ckpt.percent_complete:.1f}% ({ckpt.completed_points:,}/{ckpt.total_points:,})"
+
+        table.add_row(
+            ckpt.job_id,
+            f"[{status_style}]{ckpt.status}[/{status_style}]",
+            progress,
+            source,
+            ckpt.updated_at[:19],  # Trim microseconds
+        )
+
+    console.print(table)
+    console.print(f"\n[dim]Checkpoint directory: {mgr.checkpoint_dir}[/dim]")
+
+
+@jobs.command("show")
+@click.argument("job_id")
+@click.option(
+    "--checkpoint-dir",
+    type=click.Path(),
+    default=None,
+    help="Directory for checkpoint files",
+)
+def jobs_show(job_id: str, checkpoint_dir: str | None) -> None:
+    """Show details of a specific checkpoint."""
+    mgr = CheckpointManager(checkpoint_dir)
+
+    try:
+        ckpt = mgr.load(job_id)
+    except FileNotFoundError:
+        console.print(f"[red]Checkpoint not found: {job_id}[/red]")
+        raise click.Abort()
+
+    console.print(f"\n[bold]Job: {ckpt.job_id}[/bold]\n")
+
+    table = Table(show_header=False)
+    table.add_column("Property", style="cyan")
+    table.add_column("Value")
+
+    table.add_row("Status", ckpt.status)
+    table.add_row("Created", ckpt.created_at)
+    table.add_row("Updated", ckpt.updated_at)
+    table.add_row("Source file", ckpt.source_file or "-")
+    table.add_row("Point cloud hash", ckpt.point_cloud_hash)
+    table.add_row("Total points", f"{ckpt.total_points:,}")
+    table.add_row("Completed points", f"{ckpt.completed_points:,}")
+    table.add_row("Progress", f"{ckpt.percent_complete:.2f}%")
+    table.add_row("Current layer", f"{ckpt.current_layer}/{ckpt.total_layers}")
+
+    if ckpt.error_message:
+        table.add_row("Error", f"[red]{ckpt.error_message}[/red]")
+
+    if ckpt.config_snapshot:
+        table.add_row("", "")
+        table.add_row("[bold]Config snapshot[/bold]", "")
+        for key, value in ckpt.config_snapshot.items():
+            table.add_row(f"  {key}", str(value))
+
+    console.print(table)
+
+    if ckpt.is_resumable and ckpt.source_file:
+        console.print(f"\n[cyan]Resume with: glass3d engrave {ckpt.source_file} --resume {ckpt.job_id}[/cyan]")
+
+
+@jobs.command("delete")
+@click.argument("job_id")
+@click.option(
+    "--checkpoint-dir",
+    type=click.Path(),
+    default=None,
+    help="Directory for checkpoint files",
+)
+@click.option("--force", "-f", is_flag=True, help="Delete without confirmation")
+def jobs_delete(job_id: str, checkpoint_dir: str | None, force: bool) -> None:
+    """Delete a job checkpoint."""
+    mgr = CheckpointManager(checkpoint_dir)
+
+    try:
+        ckpt = mgr.load(job_id)
+    except FileNotFoundError:
+        console.print(f"[red]Checkpoint not found: {job_id}[/red]")
+        raise click.Abort()
+
+    if not force:
+        if ckpt.is_resumable:
+            console.print(f"[yellow]Warning: Job {job_id} is resumable ({ckpt.percent_complete:.1f}% complete)[/yellow]")
+        if not click.confirm(f"Delete checkpoint {job_id}?"):
+            console.print("[dim]Cancelled[/dim]")
+            return
+
+    if mgr.delete(job_id):
+        console.print(f"[green]Deleted checkpoint: {job_id}[/green]")
+    else:
+        console.print(f"[red]Failed to delete checkpoint: {job_id}[/red]")
+
+
+@jobs.command("clean")
+@click.option(
+    "--checkpoint-dir",
+    type=click.Path(),
+    default=None,
+    help="Directory for checkpoint files",
+)
+@click.option("--force", "-f", is_flag=True, help="Delete without confirmation")
+def jobs_clean(checkpoint_dir: str | None, force: bool) -> None:
+    """Delete all completed and aborted checkpoints."""
+    mgr = CheckpointManager(checkpoint_dir)
+    checkpoints = mgr.list_checkpoints()
+
+    to_delete = [c for c in checkpoints if not c.is_resumable]
+
+    if not to_delete:
+        console.print("[dim]No completed/aborted checkpoints to clean[/dim]")
+        return
+
+    console.print(f"Found {len(to_delete)} checkpoint(s) to delete:")
+    for ckpt in to_delete:
+        console.print(f"  - {ckpt.job_id} ({ckpt.status})")
+
+    if not force:
+        if not click.confirm("Delete these checkpoints?"):
+            console.print("[dim]Cancelled[/dim]")
+            return
+
+    deleted = 0
+    for ckpt in to_delete:
+        if mgr.delete(ckpt.job_id):
+            deleted += 1
+
+    console.print(f"[green]Deleted {deleted} checkpoint(s)[/green]")
+
+
+# -----------------------------------------------------------------------------
 # Scene commands
 # -----------------------------------------------------------------------------
 
@@ -1158,6 +1419,23 @@ def scene_info(scene_file: str) -> None:
     is_flag=True,
     help="Show live matplotlib preview (updates per layer)",
 )
+@click.option(
+    "--resume", "-r",
+    type=str,
+    default=None,
+    help="Resume from checkpoint (job ID or path to checkpoint file)",
+)
+@click.option(
+    "--checkpoint-dir",
+    type=click.Path(),
+    default=None,
+    help="Directory for checkpoint files (default: ./glass3d_checkpoints)",
+)
+@click.option(
+    "--no-checkpoint",
+    is_flag=True,
+    help="Disable checkpoint saving (not recommended for long jobs)",
+)
 def scene_engrave(
     scene_file: str,
     config: str | None,
@@ -1165,6 +1443,9 @@ def scene_engrave(
     dry_run: bool,
     mock: bool,
     live_preview: bool,
+    resume: str | None,
+    checkpoint_dir: str | None,
+    no_checkpoint: bool,
 ) -> None:
     """Engrave all models in a scene.
 
@@ -1225,9 +1506,36 @@ def scene_engrave(
         console.print(f"[green]Saved {len(cloud):,} points[/green]")
         return
 
+    # --- Checkpoint setup ---
+    checkpoint_mgr: CheckpointManager | None = None
+    resume_ckpt: CheckpointData | None = None
+
+    if not no_checkpoint:
+        checkpoint_mgr = CheckpointManager(checkpoint_dir)
+
+        if resume:
+            try:
+                resume_ckpt = checkpoint_mgr.load(resume)
+                valid, error = checkpoint_mgr.validate_for_resume(resume_ckpt, cloud)
+                if not valid:
+                    console.print(f"[bold red]Cannot resume: {error}[/bold red]")
+                    raise click.Abort()
+
+                console.print(f"\n[cyan]Resuming job {resume_ckpt.job_id}[/cyan]")
+                console.print(f"  Progress: {resume_ckpt.completed_points:,}/{resume_ckpt.total_points:,} points ({resume_ckpt.percent_complete:.1f}%)")
+                console.print(f"  Starting from layer {resume_ckpt.current_layer + 1}/{resume_ckpt.total_layers}")
+            except FileNotFoundError:
+                console.print(f"[bold red]Checkpoint not found: {resume}[/bold red]")
+                raise click.Abort()
+
     # Estimate time (accounting for travel, delays, thermal pauses)
     est_seconds = _estimate_engrave_time(cloud, cfg)
-    if est_seconds < 60:
+
+    if resume_ckpt:
+        remaining_fraction = 1.0 - (resume_ckpt.completed_points / resume_ckpt.total_points)
+        est_seconds = est_seconds * remaining_fraction
+        console.print(f"\n[yellow]Estimated remaining time: {est_seconds/60:.1f} minutes[/yellow]")
+    elif est_seconds < 60:
         console.print(f"\n[yellow]Estimated time: {est_seconds:.0f} seconds[/yellow]")
     else:
         console.print(f"\n[yellow]Estimated time: {est_seconds/60:.1f} minutes[/yellow]")
@@ -1238,7 +1546,8 @@ def scene_engrave(
             return
 
     # Engrave
-    console.print(f"\n[bold green]{'DRY RUN - ' if dry_run else ''}Starting engrave...[/bold green]\n")
+    action = "Resuming" if resume_ckpt else "Starting"
+    console.print(f"\n[bold green]{'DRY RUN - ' if dry_run else ''}{action} engrave...[/bold green]\n")
 
     with Progress(
         SpinnerColumn(),
@@ -1249,6 +1558,9 @@ def scene_engrave(
     ) as progress:
         task = progress.add_task("Engraving...", total=len(cloud))
 
+        if resume_ckpt:
+            progress.update(task, completed=resume_ckpt.completed_points)
+
         def update_progress(p: EngraveProgress) -> None:
             progress.update(
                 task,
@@ -1256,21 +1568,40 @@ def scene_engrave(
                 description=f"Layer {p.current_layer + 1}/{p.total_layers}",
             )
 
+        final_checkpoint: CheckpointData | None = None
         try:
             with LaserController(cfg) as laser:
-                laser.engrave_point_cloud(
+                final_checkpoint = laser.engrave_point_cloud(
                     cloud,
                     progress_callback=update_progress,
                     dry_run=dry_run,
                     live_preview=live_preview,
+                    checkpoint_manager=checkpoint_mgr,
+                    resume_checkpoint=resume_ckpt,
+                    source_file=str(Path(scene_file).resolve()),
                 )
 
             console.print("\n[bold green]Engrave complete![/bold green]")
+            if final_checkpoint and checkpoint_mgr:
+                console.print(f"[dim]Job {final_checkpoint.job_id} finished[/dim]")
 
         except InterruptedError:
             console.print("\n[bold yellow]Engrave aborted[/bold yellow]")
+            if checkpoint_mgr:
+                resumable = checkpoint_mgr.find_resumable(str(Path(scene_file).resolve()))
+                if resumable:
+                    ckpt = resumable[0]
+                    ckpt_path = checkpoint_mgr.checkpoint_path(ckpt.job_id)
+                    console.print(f"[cyan]Checkpoint saved: {ckpt_path}[/cyan]")
+                    console.print(f"[cyan]Resume with: glass3d scene engrave {scene_file} --resume {ckpt.job_id}[/cyan]")
         except Exception as e:
             console.print(f"\n[bold red]Error: {e}[/bold red]")
+            if checkpoint_mgr:
+                resumable = checkpoint_mgr.find_resumable(str(Path(scene_file).resolve()))
+                if resumable:
+                    ckpt = resumable[0]
+                    console.print(f"[cyan]Checkpoint available: {ckpt.job_id} ({ckpt.percent_complete:.1f}% complete)[/cyan]")
+                    console.print(f"[cyan]Resume with: glass3d scene engrave {scene_file} --resume {ckpt.job_id}[/cyan]")
             raise click.Abort()
 
 

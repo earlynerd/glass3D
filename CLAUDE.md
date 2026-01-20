@@ -6,6 +6,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Glass3D creates 3D subsurface laser engravings (SSLE) in glass/crystal blocks. It converts 3D models (STL/OBJ) into point clouds and controls BJJCZ galvo lasers via the `galvoplotter` library to create micro-fractures inside transparent materials.
 
+## Development Environment
+
+```bash
+# Activate virtual environment (required before running commands)
+venv/Scripts/activate      # Windows (cmd/powershell)
+source venv/bin/activate   # Linux/Mac
+
+# Or use venv python directly (useful in Git Bash on Windows)
+venv/Scripts/python -m pytest tests/
+```
+
 ## Commands
 
 ```bash
@@ -37,6 +48,10 @@ glass3d preview model.stl --strategy surface        # 3D visualization
 glass3d preview scene.3mf --max-points 100000       # Preview 3MF with workspace bounds
 glass3d engrave model.stl --mock --dry-run          # Test without hardware
 glass3d engrave scene.3mf --mock --dry-run          # Engrave 3MF scene
+glass3d engrave model.stl --resume <job_id>         # Resume interrupted job
+glass3d jobs list                                   # List checkpoints
+glass3d jobs show <job_id>                          # Show checkpoint details
+glass3d jobs clean                                  # Delete completed checkpoints
 glass3d generate-anchor -o anchor.stl               # Create anchor for slicer workflow
 glass3d init-config -o config.json -m k9            # Generate config
 glass3d test-connection --mock                      # Test laser connection
@@ -61,6 +76,8 @@ For multi-model workflows: **3MF Import → Scene Management → Combined Point 
 - **`glass3d/laser/controller.py`**: `LaserController` wraps galvoplotter with safety checks. `CoordinateTransformer` converts mm coordinates to 16-bit galvo coordinates (0x0000-0xFFFF, center at 0x8000).
 
 - **`glass3d/cli.py`**: Click-based CLI using Rich for output formatting.
+
+- **`glass3d/core/checkpoint.py`**: `CheckpointData` (Pydantic model) and `CheckpointManager` for fault-tolerant engraving. Saves progress at layer boundaries, enables resume after crashes/power outages.
 
 ### Scene Module (Multi-Model Support)
 
@@ -149,3 +166,92 @@ Models are skipped if "anchor" appears anywhere in their name (case-insensitive)
 - `Assembly1_anchor` ✓
 
 This allows anchors to work even when models are grouped into assemblies in the slicer.
+
+## Checkpoint/Resume System
+
+Long engrave jobs (hours) need fault tolerance. The checkpoint system saves progress at layer boundaries, enabling resume after:
+- Power outages
+- Software crashes
+- User abort (Ctrl+C)
+- Hardware errors
+
+### Checkpoint Files
+
+Stored in `./glass3d_checkpoints/` by default:
+
+```json
+{
+  "job_id": "abc12345",
+  "source_file": "/path/to/model.stl",
+  "point_cloud_hash": "f8a3b2c1...",
+  "total_points": 150000,
+  "completed_points": 45230,
+  "current_layer": 127,
+  "total_layers": 500,
+  "status": "in_progress"
+}
+```
+
+### Resume Validation
+
+Before resuming, the system validates:
+- Point cloud hash matches (same model + same generation settings)
+- Point count matches
+- Checkpoint is resumable (not already completed)
+
+This prevents accidentally resuming with a different model or settings, which would corrupt the engraving.
+
+### CLI Usage
+
+```bash
+# Checkpoints are enabled by default
+glass3d engrave model.stl
+
+# After interruption, resume with job ID
+glass3d engrave model.stl --resume abc12345
+
+# Or resume with full checkpoint path
+glass3d engrave model.stl --resume ./glass3d_checkpoints/checkpoint_abc12345.json
+
+# List all checkpoints
+glass3d jobs list
+glass3d jobs list --all  # Include completed jobs
+
+# View checkpoint details
+glass3d jobs show abc12345
+
+# Delete a checkpoint
+glass3d jobs delete abc12345
+
+# Clean up completed/aborted checkpoints
+glass3d jobs clean
+
+# Disable checkpoints (not recommended for long jobs)
+glass3d engrave model.stl --no-checkpoint
+```
+
+### Programmatic Usage
+
+```python
+from glass3d.core.checkpoint import CheckpointManager, CheckpointData
+
+# Create manager
+mgr = CheckpointManager("./my_checkpoints")
+
+# Engrave with checkpointing
+with LaserController(config) as laser:
+    checkpoint = laser.engrave_point_cloud(
+        cloud,
+        checkpoint_manager=mgr,
+        source_file="model.stl",
+    )
+
+# Resume from checkpoint
+resume_ckpt = mgr.load("abc12345")
+with LaserController(config) as laser:
+    laser.engrave_point_cloud(
+        cloud,
+        checkpoint_manager=mgr,
+        resume_checkpoint=resume_ckpt,
+    )
+```

@@ -20,6 +20,7 @@ from numpy.typing import NDArray
 from ..core.config import LensCorrection
 
 if TYPE_CHECKING:
+    from ..core.checkpoint import CheckpointData, CheckpointManager
     from ..core.config import Glass3DConfig
     from ..core.point_cloud import PointCloud
 
@@ -642,8 +643,11 @@ class LaserController:
         progress_callback: Callable[[EngraveProgress], None] | None = None,
         dry_run: bool = False,
         live_preview: bool = False,
-    ) -> None:
-        """Engrave a point cloud.
+        checkpoint_manager: CheckpointManager | None = None,
+        resume_checkpoint: CheckpointData | None = None,
+        source_file: str | None = None,
+    ) -> CheckpointData | None:
+        """Engrave a point cloud with optional checkpoint support.
 
         Points are engraved in order (caller should pre-sort).
         For SSLE, points should be sorted bottom-up (ascending Z).
@@ -653,6 +657,12 @@ class LaserController:
             progress_callback: Optional callback for progress updates
             dry_run: If True, simulate without firing laser
             live_preview: If True, show matplotlib preview updated per layer
+            checkpoint_manager: Optional manager for saving checkpoints
+            resume_checkpoint: Optional checkpoint to resume from
+            source_file: Original source file path (for checkpoint metadata)
+
+        Returns:
+            Final CheckpointData if checkpointing enabled, None otherwise
         """
         if not self._connected:
             self.connect()
@@ -664,7 +674,7 @@ class LaserController:
             valid, issues = self.validate_point_cloud(cloud)
             if not valid:
                 raise ValueError(f"Point cloud validation failed:\n" + "\n".join(issues))
-        
+
         # Reset abort flag
         self._abort_requested = False
 
@@ -672,11 +682,49 @@ class LaserController:
         self._apply_laser_params()
 
         total_points = len(cloud)
-        completed = 0
-        start_time = time.time()
-
+        total_layers = cloud.num_layers
         chunk_size = self.config.engrave.chunk_size
         dwell_ms = self.config.laser.point_dwell_ms
+
+        # --- Checkpoint setup ---
+        checkpoint: CheckpointData | None = None
+        skip_to_layer = 0
+        skip_to_point_in_layer = 0
+        completed = 0
+
+        if checkpoint_manager is not None:
+            from ..core.checkpoint import CheckpointData as CheckpointDataCls
+
+            if resume_checkpoint is not None:
+                # Validate checkpoint matches this point cloud
+                valid, error = checkpoint_manager.validate_for_resume(resume_checkpoint, cloud)
+                if not valid:
+                    raise ValueError(f"Cannot resume: {error}")
+
+                checkpoint = resume_checkpoint
+                skip_to_layer = checkpoint.current_layer
+                completed = checkpoint.completed_points
+                logger.info(
+                    f"Resuming job {checkpoint.job_id} from layer {skip_to_layer}, "
+                    f"{completed}/{total_points} points already complete"
+                )
+            else:
+                # Create new checkpoint
+                config_snapshot = {
+                    "power": self.config.laser.power,
+                    "frequency": self.config.laser.frequency,
+                    "point_dwell_ms": self.config.laser.point_dwell_ms,
+                    "dry_run": dry_run,
+                }
+                checkpoint = CheckpointDataCls.create_new(
+                    cloud=cloud,
+                    source_file=source_file,
+                    config_snapshot=config_snapshot,
+                )
+                checkpoint_manager.save(checkpoint)
+                logger.info(f"Created checkpoint: {checkpoint.job_id}")
+
+        start_time = time.time()
 
         # Initialize live preview if requested
         preview = None
@@ -688,7 +736,7 @@ class LaserController:
             )
 
         logger.info(f"Starting engrave: {total_points} points")
-        
+
         try:
             if dry_run:
                 context = self._controller.lighting()
@@ -696,18 +744,25 @@ class LaserController:
                 context = self._controller.marking()
 
             optimize_xy = self.config.engrave.optimize_path
-            total_layers = cloud.num_layers
 
             with context as c:
                 points_since_pause = 0
                 last_xy: tuple[float, float] | None = None
+                global_point_idx = 0  # Track position across all layers
 
                 # Iterate layer by layer (sorted by Z ascending)
                 for layer_idx, layer_cloud in cloud.iter_layers():
                     self._check_abort()
 
                     layer_points = layer_cloud.points
-                    if len(layer_points) == 0:
+                    layer_size = len(layer_points)
+
+                    if layer_size == 0:
+                        continue
+
+                    # Skip completed layers when resuming
+                    if layer_idx < skip_to_layer:
+                        global_point_idx += layer_size
                         continue
 
                     # Move Z axis once at start of layer
@@ -720,7 +775,7 @@ class LaserController:
                     if z_settle_ms > 0:
                         time.sleep(z_settle_ms / 1000.0)
 
-                    logger.debug(f"Layer {layer_idx}: Z={layer_z:.3f}mm, {len(layer_points)} points")
+                    logger.debug(f"Layer {layer_idx}: Z={layer_z:.3f}mm, {layer_size} points")
 
                     # Update live preview at start of each layer
                     if preview is not None:
@@ -733,7 +788,7 @@ class LaserController:
                         )
 
                     # Optimize XY path within this layer
-                    if optimize_xy and len(layer_points) > 2:
+                    if optimize_xy and layer_size > 2:
                         order = optimize_path_nearest_neighbor(layer_points, last_xy)
                         layer_points = layer_points[order]
 
@@ -746,16 +801,16 @@ class LaserController:
                         # Convert to galvo coordinates
                         x_galvo, y_galvo = self.transformer.mm_to_galvo_coords(x_mm, y_mm)
 
-                        # Move to position and fire
-                        c.goto(x_galvo, y_galvo)
-
+                        # Move to position and fire (or simulate)
                         if dry_run:
-                            c.light(x_galvo, y_galvo)
-                            time.sleep(0.0001)  # Brief delay for preview
+                            c.light(x_galvo, y_galvo)  # Move with red light
+                            c.wait(dwell_ms)  # Pause same duration as real dwell
                         else:
-                            c.dwell(dwell_ms)
+                            c.goto(x_galvo, y_galvo)  # Move to position
+                            c.dwell(dwell_ms)  # Fire at current position
 
                         completed += 1
+                        global_point_idx += 1
                         points_since_pause += 1
 
                         # Thermal pause if needed
@@ -776,29 +831,53 @@ class LaserController:
                             progress_callback(progress)
 
                     # Remember last position for next layer's path optimization
-                    if len(layer_points) > 0:
+                    if layer_size > 0:
                         last_xy = (float(layer_points[-1, 0]), float(layer_points[-1, 1]))
 
                     # Mark layer as complete for preview
                     if preview is not None:
                         preview.mark_layer_complete(layer_points)
 
+                    # Save checkpoint at end of each layer
+                    if checkpoint is not None and checkpoint_manager is not None:
+                        checkpoint.update_progress(
+                            completed_points=completed,
+                            current_layer=layer_idx + 1,  # Next layer to process
+                            layer_start_point_index=global_point_idx,
+                        )
+                        checkpoint_manager.save(checkpoint)
+                        logger.debug(f"Checkpoint saved: layer {layer_idx + 1}, {completed} points")
+
             # Wait for completion
             self._controller.wait_for_machine_idle()
-            
+
             elapsed = time.time() - start_time
             logger.info(f"Engrave complete: {total_points} points in {elapsed:.1f}s")
 
+            # Mark checkpoint as completed
+            if checkpoint is not None and checkpoint_manager is not None:
+                checkpoint.mark_completed()
+                checkpoint_manager.save(checkpoint)
+                logger.info(f"Job {checkpoint.job_id} completed successfully")
+
         except InterruptedError:
             logger.warning("Engrave aborted by user")
+            if checkpoint is not None and checkpoint_manager is not None:
+                checkpoint.mark_aborted("User abort")
+                checkpoint_manager.save(checkpoint)
             raise
         except Exception as e:
             logger.error(f"Engrave failed: {e}")
+            if checkpoint is not None and checkpoint_manager is not None:
+                checkpoint.mark_aborted(str(e))
+                checkpoint_manager.save(checkpoint)
             raise
         finally:
             # Always close preview window
             if preview is not None:
                 preview.close()
+
+        return checkpoint
     
     def preview_bounds(self, cloud: PointCloud) -> None:
         """Preview the bounding box with the red dot laser.
