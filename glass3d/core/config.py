@@ -228,6 +228,12 @@ class PointCloudParams(BaseModel):
         description="Density multiplier for solid fill"
     )
 
+    # Randomization
+    randomization_seed: int | None = Field(
+        default=None,
+        description="Seed for random sampling in strategies. None = non-deterministic."
+    )
+
 
 class EngraveParams(BaseModel):
     """Parameters for the engraving process."""

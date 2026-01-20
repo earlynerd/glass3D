@@ -351,6 +351,12 @@ def _load_and_generate_point_cloud(
     is_flag=True,
     help="Disable checkpoint saving (not recommended for long jobs)",
 )
+@click.option(
+    "--cor-file",
+    type=click.Path(exists=True),
+    default=None,
+    help="Hardware correction file (.cor) to upload to controller",
+)
 @click.pass_context
 def engrave(
     ctx: click.Context,
@@ -370,6 +376,7 @@ def engrave(
     resume: str | None,
     checkpoint_dir: str | None,
     no_checkpoint: bool,
+    cor_file: str | None,
 ) -> None:
     """Engrave a 3D model or scene into glass.
 
@@ -398,11 +405,22 @@ def engrave(
         cfg.point_cloud.shell_spacing_mm = shell_spacing
     cfg.engrave.dry_run = dry_run
 
+    # When using hardware correction, disable software lens correction
+    # (the board will apply correction from the uploaded table)
+    if cor_file:
+        cfg.machine.lens_correction.enabled = False
+
     console.print(f"\n[bold]Glass3D Engraver[/bold]\n")
 
     # Load model(s) and generate point cloud
     cloud, info = _load_and_generate_point_cloud(model_path, cfg, scale, max_size)
-    
+
+    # Remove duplicate points (can occur from overlapping generation passes)
+    original_count = len(cloud)
+    cloud = cloud.remove_duplicates(tolerance=0.001)  # 1 micron tolerance
+    if len(cloud) < original_count:
+        console.print(f"[dim]Removed {original_count - len(cloud):,} duplicate points[/dim]")
+
     # Show point cloud info
     cloud_stats = cloud.stats()
     table = Table(title="Point Cloud")
@@ -494,6 +512,15 @@ def engrave(
         final_checkpoint: CheckpointData | None = None
         try:
             with LaserController(cfg) as laser:
+                # Upload hardware correction table if specified
+                if cor_file:
+                    from .device.correction import CorrectionTable, write_correction_to_controller
+
+                    console.print(f"[cyan]Uploading correction table: {cor_file}[/cyan]")
+                    cor_table = CorrectionTable.from_cor_file(cor_file)
+                    write_correction_to_controller(laser._controller, cor_table)
+                    console.print("[green]Hardware correction enabled[/green]")
+
                 final_checkpoint = laser.engrave_point_cloud(
                     cloud,
                     progress_callback=update_progress,
@@ -829,7 +856,13 @@ def init_config(output: str, material: str) -> None:
     default=None,
     help="Base config file to merge with (preserves laser/material settings)",
 )
-def import_device(device_file: str, output: str | None, base_config: str | None) -> None:
+@click.option(
+    "--cor-file",
+    type=click.Path(),
+    default=None,
+    help="Output path for hardware correction file (.cor). Auto-generated if --output is set.",
+)
+def import_device(device_file: str, output: str | None, base_config: str | None, cor_file: str | None) -> None:
     """Import device settings from a LightBurn export file.
 
     DEVICE_FILE: Path to LightBurn export (.lbzip) file
@@ -934,13 +967,50 @@ def import_device(device_file: str, output: str | None, base_config: str | None)
         # Convert device to config
         cfg = device.to_config(base_cfg)
 
-        # Save
+        # Save config
         cfg.to_file(output)
         console.print(f"\n[green]Created config file: {output}[/green]")
         console.print(f"Workspace: {cfg.machine.field_size_mm[0]} x {cfg.machine.field_size_mm[1]} mm")
         console.print(f"Lens correction: [bold green]enabled[/bold green]")
+
+        # Generate .cor file for hardware correction
+        from .device.correction import generate_correction_table
+
+        lens_correction = device.to_lens_correction()
+        table = generate_correction_table(
+            lens_correction,
+            field_size_mm=(device.width_mm, device.height_mm),
+        )
+
+        # Determine cor file path
+        if cor_file:
+            cor_path = Path(cor_file)
+        else:
+            # Auto-generate path based on output config
+            cor_path = Path(output).with_suffix(".cor")
+
+        table.to_cor_file(cor_path)
+        console.print(f"[green]Created correction file: {cor_path}[/green]")
+        console.print(table.summary())
+        console.print()
+        console.print("[cyan]Use with engrave:[/cyan]")
+        console.print(f"  glass3d engrave model.stl -c {output} --cor-file {cor_path}")
     else:
-        console.print("\n[dim]Use -o/--output to save as config file[/dim]")
+        # Just generate cor file if requested
+        if cor_file:
+            from .device.correction import generate_correction_table
+
+            lens_correction = device.to_lens_correction()
+            table = generate_correction_table(
+                lens_correction,
+                field_size_mm=(device.width_mm, device.height_mm),
+            )
+            table.to_cor_file(cor_file)
+            console.print(f"\n[green]Created correction file: {cor_file}[/green]")
+            console.print(table.summary())
+        else:
+            console.print("\n[dim]Use -o/--output to save as config file[/dim]")
+            console.print("[dim]Use --cor-file to generate hardware correction file[/dim]")
 
 
 @main.command("generate-anchor")
@@ -1603,6 +1673,101 @@ def scene_engrave(
                     console.print(f"[cyan]Checkpoint available: {ckpt.job_id} ({ckpt.percent_complete:.1f}% complete)[/cyan]")
                     console.print(f"[cyan]Resume with: glass3d scene engrave {scene_file} --resume {ckpt.job_id}[/cyan]")
             raise click.Abort()
+
+
+# -----------------------------------------------------------------------------
+# Calibration commands
+# -----------------------------------------------------------------------------
+
+@main.group()
+def calibrate() -> None:
+    """Calibration and lens correction tools."""
+    pass
+
+
+@calibrate.command("compare-coords")
+@click.option(
+    "--config", "-c",
+    type=click.Path(exists=True),
+    default=None,
+    help="Config file with lens correction settings",
+)
+@click.option(
+    "--device", "-d",
+    type=click.Path(exists=True),
+    default=None,
+    help="LightBurn device file (.lbzip) to load settings from",
+)
+@click.option(
+    "--grid-size", "-g",
+    type=int,
+    default=5,
+    help="Number of grid points per axis (e.g., 5 = 5x5 = 25 points)",
+)
+@click.option(
+    "--format", "-f",
+    "output_format",
+    type=click.Choice(["table", "csv"]),
+    default="table",
+    help="Output format",
+)
+def calibrate_compare_coords(
+    config: str | None,
+    device: str | None,
+    grid_size: int,
+    output_format: str,
+) -> None:
+    """Output transformed coordinates for comparison with LightBurn.
+
+    Generate a grid of test points, apply lens correction, and output
+    the resulting galvo coordinates. Compare these with LightBurn's
+    preview coordinates to verify calibration.
+
+    Examples:
+
+        glass3d calibrate compare-coords --device mydevice.lbzip
+
+        glass3d calibrate compare-coords --config config.json --grid-size 9
+
+        glass3d calibrate compare-coords --format csv > coords.csv
+    """
+    from .device.calibration import compare_coordinates, format_comparison_table, format_comparison_csv
+    from .device.lightburn import load_lightburn_device
+
+    # Load configuration
+    if config:
+        cfg = Glass3DConfig.from_file(config)
+    elif device:
+        lb_device = load_lightburn_device(device)
+        cfg = lb_device.to_glass3d_config()
+    else:
+        cfg = Glass3DConfig.default()
+
+    # Check if lens correction is enabled
+    if cfg.lens_correction is None or not cfg.lens_correction.enabled:
+        console.print("[yellow]Warning: Lens correction is disabled or not configured[/yellow]")
+        console.print("[dim]Results will show uncorrected coordinate transformation[/dim]\n")
+
+    # Generate comparison data
+    points = compare_coordinates(cfg, grid_size)
+
+    # Output
+    if output_format == "csv":
+        output = format_comparison_csv(points)
+        click.echo(output)
+    else:
+        console.print(f"\n[bold]Coordinate Comparison[/bold] ({grid_size}x{grid_size} grid)\n")
+        console.print(f"Field size: {cfg.machine.field_size_mm[0]}x{cfg.machine.field_size_mm[1]} mm")
+        if cfg.lens_correction and cfg.lens_correction.enabled:
+            console.print("[green]Lens correction: enabled[/green]")
+        else:
+            console.print("[yellow]Lens correction: disabled[/yellow]")
+        console.print()
+
+        output = format_comparison_table(points)
+        console.print(output)
+
+        console.print("\n[dim]Compare output_galvo values with LightBurn's preview coordinates[/dim]")
 
 
 if __name__ == "__main__":

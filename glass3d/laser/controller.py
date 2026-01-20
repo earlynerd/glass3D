@@ -69,19 +69,23 @@ def _apply_lens_correction(
     y = y * correction.y_axis.sign
 
     # 5. Skew correction (parallelogram distortion)
-    # Skew affects the perpendicularity of axes
+    # Skew affects the perpendicularity of axes.
+    # NOTE: Order matters! Y-skew uses the already-modified X value, creating
+    # a coupled transformation. Use `glass3d calibrate compare-coords` to
+    # verify output matches LightBurn for your device settings.
     if correction.x_axis.skew != 1.0:
         x = x + (correction.x_axis.skew - 1.0) * y
     if correction.y_axis.skew != 1.0:
-        y = y + (correction.y_axis.skew - 1.0) * x
+        y = y + (correction.y_axis.skew - 1.0) * x  # Uses modified x
 
     # 6. Trapezoid correction (keystone)
-    # Applies position-dependent scaling
+    # Applies position-dependent scaling.
+    # NOTE: Same order dependency as skew - Y trapezoid uses modified X.
     if correction.x_axis.trapezoid != 1.0:
         trap_factor = 1.0 + (correction.x_axis.trapezoid - 1.0) * y
         x = x * trap_factor
     if correction.y_axis.trapezoid != 1.0:
-        trap_factor = 1.0 + (correction.y_axis.trapezoid - 1.0) * x
+        trap_factor = 1.0 + (correction.y_axis.trapezoid - 1.0) * x  # Uses modified x
         y = y * trap_factor
 
     # 7. Bulge correction (barrel/pincushion distortion)
@@ -616,23 +620,20 @@ class LaserController:
         if max_pt[2] > z_max:
             issues.append(f"Z maximum {max_pt[2]:.1f}mm above range (max {z_max:.1f}mm)")
         
-        # Check point spacing
-        # (simplified - full check would use spatial data structure)
+        # Check for exact duplicate points (distance = 0)
+        # Note: We don't check consecutive point spacing here because points
+        # haven't been path-optimized yet. The actual spacing during engraving
+        # will be different from array order.
         if len(cloud) > 1:
-            # Sample-based check
-            sample_size = min(1000, len(cloud))
-            indices = np.random.choice(len(cloud), sample_size, replace=False)
-            sample = cloud.points[indices]
-            
-            # Check distances between consecutive sampled points
-            diffs = np.diff(sample, axis=0)
+            diffs = np.diff(cloud.points, axis=0)
             dists = np.linalg.norm(diffs, axis=1)
-            min_dist = dists.min()
-            
-            if min_dist < self.config.material.min_point_spacing_mm:
+            min_dist = float(dists.min())
+
+            # Only error on exact duplicates (tolerance for floating point)
+            if min_dist < 1e-6:
+                num_dupes = np.sum(dists < 1e-6)
                 issues.append(
-                    f"Point spacing {min_dist:.3f}mm below minimum "
-                    f"({self.config.material.min_point_spacing_mm:.3f}mm)"
+                    f"Found {num_dupes} duplicate points (use cloud.remove_duplicates() to fix)"
                 )
         
         return len(issues) == 0, issues

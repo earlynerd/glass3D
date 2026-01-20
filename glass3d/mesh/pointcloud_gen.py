@@ -262,7 +262,8 @@ class GrayscaleStrategy(BaseStrategy):
         keep_probability = 1.0 - (normalized_dist * 0.8)  # Keep 20% minimum
         
         # Random sampling based on probability
-        rng = np.random.default_rng(42)
+        # Use configured seed (None = non-deterministic)
+        rng = np.random.default_rng(params.randomization_seed)
         keep_mask = rng.random(len(dense_cloud)) < keep_probability
         
         filtered = dense_cloud[keep_mask]

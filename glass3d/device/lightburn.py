@@ -126,15 +126,18 @@ class LightBurnDevice:
     def to_lens_correction(self) -> LensCorrection:
         """Convert to Glass3D LensCorrection config."""
         # Map galvo axes based on Galvo_1_is_X setting
+        # Note: LightBurn's Galvo_1_is_X=False means Galvo_1 drives X (counterintuitive)
+        # This was verified by comparing glass3d output to actual LightBurn commands
         if self.galvo_1_is_x:
-            x_axis = GalvoAxisCorrection(
+            # Galvo_1_is_X=True: Galvo 1 -> Y, Galvo 2 -> X
+            y_axis = GalvoAxisCorrection(
                 scale=self.galvo_1_scale,
                 bulge=self.galvo_1_bulge,
                 trapezoid=self.galvo_1_trapezoid,
                 skew=self.galvo_1_skew,
                 sign=self.galvo_1_sign,
             )
-            y_axis = GalvoAxisCorrection(
+            x_axis = GalvoAxisCorrection(
                 scale=self.galvo_2_scale,
                 bulge=self.galvo_2_bulge,
                 trapezoid=self.galvo_2_trapezoid,
@@ -142,15 +145,15 @@ class LightBurnDevice:
                 sign=self.galvo_2_sign,
             )
         else:
-            # Galvo_1 is Y (typical for JCZ controllers)
-            y_axis = GalvoAxisCorrection(
+            # Galvo_1_is_X=False: Galvo 1 -> X, Galvo 2 -> Y (typical for JCZ controllers)
+            x_axis = GalvoAxisCorrection(
                 scale=self.galvo_1_scale,
                 bulge=self.galvo_1_bulge,
                 trapezoid=self.galvo_1_trapezoid,
                 skew=self.galvo_1_skew,
                 sign=self.galvo_1_sign,
             )
-            x_axis = GalvoAxisCorrection(
+            y_axis = GalvoAxisCorrection(
                 scale=self.galvo_2_scale,
                 bulge=self.galvo_2_bulge,
                 trapezoid=self.galvo_2_trapezoid,

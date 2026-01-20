@@ -213,7 +213,34 @@ class PointCloud:
         rng = np.random.default_rng(seed)
         indices = rng.choice(len(self), size=min(n, len(self)), replace=False)
         return self[indices]
-    
+
+    def remove_duplicates(self, tolerance: float = 1e-6) -> PointCloud:
+        """Return new PointCloud with duplicate points removed.
+
+        Points are considered duplicates if all coordinates are within
+        the given tolerance.
+
+        Args:
+            tolerance: Distance threshold for duplicate detection
+
+        Returns:
+            PointCloud with unique points only
+        """
+        if len(self) == 0:
+            return self
+
+        # Round to tolerance precision and find unique rows
+        scale = 1.0 / tolerance if tolerance > 0 else 1e10
+        rounded = np.round(self.points * scale).astype(np.int64)
+
+        # Find unique rows and their indices
+        _, unique_indices = np.unique(rounded, axis=0, return_index=True)
+
+        # Sort to preserve original order
+        unique_indices = np.sort(unique_indices)
+
+        return self[unique_indices]
+
     # -------------------------------------------------------------------------
     # Combining
     # -------------------------------------------------------------------------
