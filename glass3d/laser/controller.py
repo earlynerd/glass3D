@@ -829,11 +829,12 @@ class LaserController:
                         global_point_idx += layer_size
                         continue
 
-                    # Turn off red laser before Z movement (in dry_run mode)
+                    # Flush pending commands and prepare for Z movement
+                    # In dry_run mode, also turn off red laser during Z move
+                    self._controller._list_end()
+                    self._controller.execute_list()
+                    self._controller.wait_for_machine_idle()
                     if dry_run:
-                        self._controller._list_end()
-                        self._controller.execute_list()
-                        self._controller.wait_for_machine_idle()
                         self._controller.light_off(override_list=False)
 
                     # Move Z axis once at start of layer
@@ -846,10 +847,10 @@ class LaserController:
                     if z_settle_ms > 0:
                         time.sleep(z_settle_ms / 1000.0)
 
-                    # Turn red laser back on after Z movement (in dry_run mode)
-                    # Reset list to prepare for new commands after the previous execute
+                    # Reset list to prepare for new layer's commands
+                    # In dry_run mode, also turn red laser back on
+                    self._controller.reset_list()
                     if dry_run:
-                        self._controller.reset_list()
                         self._controller.light_on(override_list=False)
 
                     logger.debug(f"Layer {layer_idx}: Z={layer_z:.3f}mm, {layer_size} points")
