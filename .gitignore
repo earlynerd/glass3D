@@ -7,3 +7,8 @@
 /.claude
 *.3mf
 *.g3scene
+config.json
+*.cor
+*.lbzip
+/glass3d_checkpoints
+/build

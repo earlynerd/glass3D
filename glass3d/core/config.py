@@ -272,6 +272,10 @@ class Glass3DConfig(BaseModel):
         default=None,
         description="Path to galvoplotter settings JSON"
     )
+    cor_file: Path | None = Field(
+        default=None,
+        description="Path to hardware correction table file (.cor)"
+    )
     mock_laser: bool = Field(default=False, description="Use mock connection for testing")
     
     @classmethod

@@ -112,12 +112,14 @@ class LightBurnDevice:
             default_jump_speed=float(settings.get("Default_JumpSpeed", 4000)),
             frame_speed=float(settings.get("FrameSpeed", 4000)),
             # Timing (all in microseconds)
-            jump_delay_min=float(settings.get("Default_MinJumpDelay", 200)),
-            jump_delay_max=float(settings.get("Default_MaxJumpDelay", 400)),
-            jump_distance_threshold=float(settings.get("Default_MaxJumpDistance", 10)),
-            laser_on_delay=float(settings.get("Default_LaserOn_TC", 100)),
-            laser_off_delay=float(settings.get("Default_LaserOff_TC", 100)),
-            polygon_delay=float(settings.get("Default_Polygon_TC", 100)),
+            # Note: LightBurn can have negative timing values for compensation,
+            # but we use absolute values since our system doesn't support negative delays
+            jump_delay_min=abs(float(settings.get("Default_MinJumpDelay", 200))),
+            jump_delay_max=abs(float(settings.get("Default_MaxJumpDelay", 400))),
+            jump_distance_threshold=abs(float(settings.get("Default_MaxJumpDistance", 10))),
+            laser_on_delay=abs(float(settings.get("Default_LaserOn_TC", 100))),
+            laser_off_delay=abs(float(settings.get("Default_LaserOff_TC", 100))),
+            polygon_delay=abs(float(settings.get("Default_Polygon_TC", 100))),
             # Laser
             laser_min_freq=float(settings.get("Laser_MinFreq", 1)),
             laser_max_freq=float(settings.get("Laser_MaxFreq", 80)),

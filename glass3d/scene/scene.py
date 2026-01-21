@@ -361,7 +361,18 @@ class Scene(BaseModel):
         """
         path = Path(path)
 
-        # Load 3MF using trimesh (returns a Scene for multi-object files)
+        # Create scene with workspace bounds
+        scene = cls(
+            name=path.stem,
+            workspace=workspace or WorkspaceBounds(),
+        )
+
+        # Try BambuStudio format first (handles objectid references correctly)
+        if cls._is_bambu_3mf(path):
+            scene._load_bambu_3mf(path)
+            return scene
+
+        # Fall back to trimesh-based loading for other formats
         loaded = trimesh.load(str(path))
 
         # Try to extract volume info from slicer metadata (includes face ranges)
@@ -369,12 +380,6 @@ class Scene(BaseModel):
 
         # Fall back to simple name map if no volume info
         name_map = cls._extract_slicer_names(path) if not volume_info else {}
-
-        # Create scene with workspace bounds
-        scene = cls(
-            name=path.stem,
-            workspace=workspace or WorkspaceBounds(),
-        )
 
         # Handle single mesh vs scene
         if isinstance(loaded, trimesh.Trimesh):
@@ -391,6 +396,211 @@ class Scene(BaseModel):
             raise ValueError(f"Unexpected type from trimesh.load: {type(loaded)}")
 
         return scene
+
+    @staticmethod
+    def _is_bambu_3mf(path: Path) -> bool:
+        """Check if a 3MF file is in BambuStudio format.
+
+        BambuStudio 3MF files have:
+        - Metadata/model_settings.config with part names
+        - 3D/Objects/*.model files with multiple objects
+        - Components that reference objectid within model files
+        """
+        import zipfile
+
+        try:
+            with zipfile.ZipFile(path, 'r') as zf:
+                names = zf.namelist()
+                has_bambu_config = 'Metadata/model_settings.config' in names
+                has_object_models = any(n.startswith('3D/Objects/') and n.endswith('.model') for n in names)
+                return has_bambu_config and has_object_models
+        except Exception:
+            return False
+
+    def _load_bambu_3mf(self, path: Path) -> None:
+        """Load a BambuStudio format 3MF file.
+
+        BambuStudio stores multiple meshes in single .model files and references
+        them by objectid in component tags. This method correctly loads each mesh
+        with its proper transform.
+        """
+        import zipfile
+        import xml.etree.ElementTree as ET
+
+        ns = {
+            'm': 'http://schemas.microsoft.com/3dmanufacturing/core/2015/02',
+            'p': 'http://schemas.microsoft.com/3dmanufacturing/production/2015/06',
+        }
+
+        # Extract model names from BambuStudio metadata
+        name_map = self._extract_bambu_names(path)
+
+        with zipfile.ZipFile(path, 'r') as zf:
+            # Parse main model to get component references
+            main_content = zf.read('3D/3dmodel.model').decode('utf-8')
+            main_root = ET.fromstring(main_content)
+
+            # Get build-level transform (placement on build plate)
+            build_transform = np.eye(4)
+            for item in main_root.findall('.//m:item', ns):
+                transform_str = item.get('transform')
+                if transform_str:
+                    vals = [float(x) for x in transform_str.split()]
+                    if len(vals) == 12:
+                        build_transform[:3, :] = np.array(vals).reshape(4, 3).T
+                break  # Only use first build item
+
+            # Cache for loaded model files (path -> {objectid -> mesh})
+            model_cache: dict[str, dict[str, trimesh.Trimesh]] = {}
+
+            # Find all components and their transforms
+            for comp in main_root.findall('.//m:component', ns):
+                model_path = comp.get(f'{{{ns["p"]}}}path')
+                object_id = comp.get('objectid')
+                transform_str = comp.get('transform')
+
+                if not model_path or not object_id:
+                    continue
+
+                # Normalize path (remove leading /)
+                model_path = model_path.lstrip('/')
+
+                # Load mesh from the model file if not cached
+                if model_path not in model_cache:
+                    model_cache[model_path] = self._parse_3mf_model_file(
+                        zf.read(model_path).decode('utf-8')
+                    )
+
+                mesh = model_cache[model_path].get(object_id)
+                if mesh is None:
+                    continue
+
+                # Parse component transform (3x4 matrix in column-major order per 3MF spec:
+                # m00 m10 m20 m01 m11 m21 m02 m12 m22 m03 m13 m23)
+                component_transform = np.eye(4)
+                if transform_str:
+                    vals = [float(x) for x in transform_str.split()]
+                    if len(vals) == 12:
+                        # Reshape as 4 columns of 3 elements, then transpose to get 3x4
+                        component_transform[:3, :] = np.array(vals).reshape(4, 3).T
+
+                # Combined transform: build_transform @ component_transform
+                combined_transform = build_transform @ component_transform
+
+                # Get name from metadata or use object_id
+                display_name = name_map.get(object_id, object_id)
+
+                # Try to decompose transform, or bake it into mesh if not possible
+                try:
+                    transform = Transform3D.from_matrix(combined_transform)
+                    mesh_to_store = mesh.copy()
+                except ValueError:
+                    mesh_to_store = mesh.copy()
+                    mesh_to_store.apply_transform(combined_transform)
+                    transform = Transform3D()
+
+                model = ModelPlacement(
+                    source_path=str(path),
+                    name=display_name,
+                    transform=transform,
+                )
+                model._mesh = mesh_to_store
+                self.models.append(model)
+
+    @staticmethod
+    def _parse_3mf_model_file(content: str) -> dict[str, trimesh.Trimesh]:
+        """Parse a 3MF model file and return meshes by object ID.
+
+        Args:
+            content: XML content of the .model file
+
+        Returns:
+            Dict mapping object IDs to trimesh meshes
+        """
+        import xml.etree.ElementTree as ET
+
+        ns = {'m': 'http://schemas.microsoft.com/3dmanufacturing/core/2015/02'}
+        root = ET.fromstring(content)
+
+        meshes: dict[str, trimesh.Trimesh] = {}
+
+        for obj in root.findall('.//m:object', ns):
+            obj_id = obj.get('id')
+            if not obj_id:
+                continue
+
+            mesh_elem = obj.find('m:mesh', ns)
+            if mesh_elem is None:
+                continue
+
+            # Parse vertices
+            vertices = []
+            verts_elem = mesh_elem.find('m:vertices', ns)
+            if verts_elem is not None:
+                for v in verts_elem.findall('m:vertex', ns):
+                    vertices.append([
+                        float(v.get('x', 0)),
+                        float(v.get('y', 0)),
+                        float(v.get('z', 0)),
+                    ])
+
+            # Parse triangles
+            faces = []
+            tris_elem = mesh_elem.find('m:triangles', ns)
+            if tris_elem is not None:
+                for t in tris_elem.findall('m:triangle', ns):
+                    faces.append([
+                        int(t.get('v1', 0)),
+                        int(t.get('v2', 0)),
+                        int(t.get('v3', 0)),
+                    ])
+
+            if vertices and faces:
+                meshes[obj_id] = trimesh.Trimesh(
+                    vertices=np.array(vertices),
+                    faces=np.array(faces),
+                )
+
+        return meshes
+
+    @staticmethod
+    def _extract_bambu_names(path: Path) -> dict[str, str]:
+        """Extract model names from BambuStudio model_settings.config.
+
+        Args:
+            path: Path to the 3MF file
+
+        Returns:
+            Dict mapping part IDs to display names
+        """
+        import zipfile
+        import xml.etree.ElementTree as ET
+
+        name_map: dict[str, str] = {}
+
+        try:
+            with zipfile.ZipFile(path, 'r') as zf:
+                if 'Metadata/model_settings.config' not in zf.namelist():
+                    return name_map
+
+                content = zf.read('Metadata/model_settings.config').decode('utf-8')
+                root = ET.fromstring(content)
+
+                # Find all parts and their names
+                for part in root.findall('.//part'):
+                    part_id = part.get('id')
+                    if not part_id:
+                        continue
+
+                    for meta in part.findall('metadata'):
+                        if meta.get('key') == 'name':
+                            name_map[part_id] = meta.get('value', part_id)
+                            break
+
+        except Exception:
+            pass
+
+        return name_map
 
     @staticmethod
     def _extract_slicer_volume_info(path: Path) -> dict[str, list[dict[str, Any]]]:

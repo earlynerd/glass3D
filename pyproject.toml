@@ -26,7 +26,7 @@ keywords = ["laser", "engraving", "3d", "glass", "crystal", "galvo", "ssle"]
 
 dependencies = [
     "galvoplotter>=0.2.0",
-    "trimesh>=4.0.0",
+    "trimesh[easy]>=4.0.0",  # [easy] includes networkx, lxml, etc. for 3MF support
     "numpy>=1.24.0",
     "scipy>=1.10.0",
     "shapely>=2.0.0",
@@ -34,6 +34,7 @@ dependencies = [
     "pydantic>=2.0.0",
     "pydantic-settings>=2.0.0",
     "rich>=13.0.0",
+    "matplotlib>=3.7.0",
 ]
 
 [project.optional-dependencies]
@@ -44,12 +45,8 @@ dev = [
     "ruff>=0.1.0",
     "mypy>=1.0.0",
 ]
-viz = [
-    "matplotlib>=3.7.0",
-    "open3d>=0.17.0",
-]
 all = [
-    "glass3d[dev,viz]",
+    "glass3d[dev]",
 ]
 
 [project.scripts]

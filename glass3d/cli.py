@@ -964,16 +964,7 @@ def import_device(device_file: str, output: str | None, base_config: str | None,
         else:
             base_cfg = Glass3DConfig.default()
 
-        # Convert device to config
-        cfg = device.to_config(base_cfg)
-
-        # Save config
-        cfg.to_file(output)
-        console.print(f"\n[green]Created config file: {output}[/green]")
-        console.print(f"Workspace: {cfg.machine.field_size_mm[0]} x {cfg.machine.field_size_mm[1]} mm")
-        console.print(f"Lens correction: [bold green]enabled[/bold green]")
-
-        # Generate .cor file for hardware correction
+        # Generate .cor file for hardware correction first
         from .device.correction import generate_correction_table
 
         lens_correction = device.to_lens_correction()
@@ -990,11 +981,23 @@ def import_device(device_file: str, output: str | None, base_config: str | None,
             cor_path = Path(output).with_suffix(".cor")
 
         table.to_cor_file(cor_path)
-        console.print(f"[green]Created correction file: {cor_path}[/green]")
+
+        # Convert device to config with cor_file reference
+        cfg = device.to_config(base_cfg)
+        cfg = cfg.model_copy(update={"cor_file": cor_path})
+
+        # Save config
+        cfg.to_file(output)
+        console.print(f"\n[green]Created config file: {output}[/green]")
+        console.print(f"Workspace: {cfg.machine.field_size_mm[0]} x {cfg.machine.field_size_mm[1]} mm")
+        console.print(f"Lens correction: [bold green]enabled[/bold green]")
+        console.print(f"Hardware correction: [bold green]{cor_path}[/bold green]")
+
+        console.print(f"\n[green]Created correction file: {cor_path}[/green]")
         console.print(table.summary())
         console.print()
         console.print("[cyan]Use with engrave:[/cyan]")
-        console.print(f"  glass3d engrave model.stl -c {output} --cor-file {cor_path}")
+        console.print(f"  glass3d engrave model.stl -c {output}")
     else:
         # Just generate cor file if requested
         if cor_file:

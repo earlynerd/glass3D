@@ -31,16 +31,20 @@ def _apply_lens_correction(
     x_norm: float,
     y_norm: float,
     correction: LensCorrection,
+    skip_geometry: bool = False,
 ) -> tuple[float, float]:
     """Apply lens distortion correction to normalized coordinates.
 
     Coordinates should be in range [-1, 1] representing the galvo field.
-    Corrections are applied in order: mirror → rotation → scale → skew → trapezoid → bulge
+    Corrections are applied in order: mirror → rotation → scale → sign → [skew → trapezoid → bulge]
 
     Args:
         x_norm: Normalized X coordinate (-1 to 1)
         y_norm: Normalized Y coordinate (-1 to 1)
         correction: Lens correction parameters
+        skip_geometry: If True, only apply scale/sign/mirror/rotation and skip
+                      bulge/trapezoid/skew. Use when hardware correction (.cor file)
+                      handles the geometric distortions.
 
     Returns:
         Corrected (x_norm, y_norm)
@@ -60,13 +64,19 @@ def _apply_lens_correction(
         sin_a = np.sin(angle_rad)
         x, y = x * cos_a - y * sin_a, x * sin_a + y * cos_a
 
-    # 3. Scale (per-axis calibration)
+    # 3. Scale (per-axis calibration) - always applied
+    # Scale represents actual vs expected field size, not geometric distortion
     x = x * correction.x_axis.scale
     y = y * correction.y_axis.scale
 
-    # 4. Sign (axis direction)
+    # 4. Sign (axis direction) - always applied
     x = x * correction.x_axis.sign
     y = y * correction.y_axis.sign
+
+    # When hardware correction is active, skip geometry corrections
+    # The .cor file uploaded to the controller handles these
+    if skip_geometry:
+        return x, y
 
     # 5. Skew correction (parallelogram distortion)
     # Skew affects the perpendicularity of axes.
@@ -195,6 +205,7 @@ class CoordinateTransformer:
         offset_mm: tuple[float, float] = (0.0, 0.0),
         corner_origin: bool = True,
         lens_correction: LensCorrection | None = None,
+        hardware_correction_active: bool = False,
     ):
         """Initialize transformer.
 
@@ -205,6 +216,9 @@ class CoordinateTransformer:
             corner_origin: If True, input coordinates use corner-origin (0,0 at corner).
                           If False, input coordinates are centered (0,0 at field center).
             lens_correction: Optional lens distortion correction parameters
+            hardware_correction_active: If True, a .cor file is being used for hardware
+                                       correction. Software will only apply scale/sign/mirror,
+                                       skipping bulge/trapezoid/skew (handled by hardware).
         """
         self.field_size_mm = field_size_mm
         self.galvo_max = (2 ** galvo_bits) - 1
@@ -212,6 +226,7 @@ class CoordinateTransformer:
         self.offset_mm = offset_mm
         self.corner_origin = corner_origin
         self.lens_correction = lens_correction
+        self.hardware_correction_active = hardware_correction_active
 
         # Conversion factors
         self.mm_to_galvo = (
@@ -264,7 +279,11 @@ class CoordinateTransformer:
             y_norm = y_mm / half_y
 
             # Apply distortion correction
-            x_norm, y_norm = _apply_lens_correction(x_norm, y_norm, self.lens_correction)
+            # When hardware correction is active, only apply scale/sign/mirror
+            x_norm, y_norm = _apply_lens_correction(
+                x_norm, y_norm, self.lens_correction,
+                skip_geometry=self.hardware_correction_active,
+            )
 
             # Convert back to mm
             x_mm = x_norm * half_x
@@ -369,13 +388,23 @@ class LaserController:
         
         # Initialize coordinate transformer with lens correction if configured
         lens_correction = config.machine.lens_correction
+
+        # Determine if hardware correction will be used (.cor file)
+        # When hardware correction is active, software only applies scale/sign/mirror
+        # and skips geometric corrections (bulge/trapezoid/skew) which the board handles
+        hardware_correction = config.cor_file is not None and not config.mock_laser
+
         if lens_correction.enabled:
-            logger.info("Lens correction enabled")
+            if hardware_correction:
+                logger.info("Lens correction: hardware (.cor) + software scale")
+            else:
+                logger.info("Lens correction: software only (full)")
 
         self.transformer = CoordinateTransformer(
             field_size_mm=config.machine.field_size_mm,
             galvo_bits=config.machine.galvo_bits,
             lens_correction=lens_correction if lens_correction.enabled else None,
+            hardware_correction_active=hardware_correction,
         )
         
         # Z-axis state
@@ -400,9 +429,13 @@ class LaserController:
             else:
                 logger.info("Connecting with default settings")
                 self._controller = GalvoController()
-            
+
             self._connected = True
             logger.info("Laser controller connected")
+
+            # Upload glass3d .cor file if specified (uses different format than galvoplotter)
+            if self.config.cor_file and not self.config.mock_laser:
+                self._upload_correction_table()
             
         except ImportError:
             raise RuntimeError(
@@ -421,7 +454,34 @@ class LaserController:
             finally:
                 self._controller = None
                 self._connected = False
-    
+
+    def _upload_correction_table(self) -> None:
+        """Upload glass3d .cor file to controller.
+
+        Glass3D uses a 5-byte format for .cor files which is different from
+        galvoplotter's expected format. This method loads the glass3d format
+        and uploads it using the proper conversion.
+        """
+        if not self.config.cor_file or not self._controller:
+            return
+
+        from pathlib import Path
+        from ..device.correction import CorrectionTable, write_correction_to_controller
+
+        cor_path = Path(self.config.cor_file)
+        if not cor_path.exists():
+            logger.warning(f"Correction file not found: {cor_path}")
+            return
+
+        try:
+            table = CorrectionTable.from_cor_file(cor_path)
+            logger.info(f"Loaded correction table from {cor_path}")
+            logger.debug(table.summary())
+            write_correction_to_controller(self._controller, table)
+        except Exception as e:
+            logger.error(f"Failed to load/upload correction table: {e}")
+            raise
+
     @property
     def is_connected(self) -> bool:
         """Check if controller is connected."""
@@ -747,6 +807,9 @@ class LaserController:
             optimize_xy = self.config.engrave.optimize_path
 
             with context as c:
+                # Clear any pending commands from previous operations
+                self._controller.reset_list()
+
                 points_since_pause = 0
                 last_xy: tuple[float, float] | None = None
                 global_point_idx = 0  # Track position across all layers
@@ -766,6 +829,13 @@ class LaserController:
                         global_point_idx += layer_size
                         continue
 
+                    # Turn off red laser before Z movement (in dry_run mode)
+                    if dry_run:
+                        self._controller._list_end()
+                        self._controller.execute_list()
+                        self._controller.wait_for_machine_idle()
+                        self._controller.light_off(override_list=False)
+
                     # Move Z axis once at start of layer
                     # Use mean Z of layer to handle any floating-point variations
                     layer_z = float(np.mean(layer_points[:, 2]))
@@ -775,6 +845,12 @@ class LaserController:
                     z_settle_ms = self.config.machine.z_axis_settle_ms
                     if z_settle_ms > 0:
                         time.sleep(z_settle_ms / 1000.0)
+
+                    # Turn red laser back on after Z movement (in dry_run mode)
+                    # Reset list to prepare for new commands after the previous execute
+                    if dry_run:
+                        self._controller.reset_list()
+                        self._controller.light_on(override_list=False)
 
                     logger.debug(f"Layer {layer_idx}: Z={layer_z:.3f}mm, {layer_size} points")
 
@@ -792,6 +868,11 @@ class LaserController:
                     if optimize_xy and layer_size > 2:
                         order = optimize_path_nearest_neighbor(layer_points, last_xy)
                         layer_points = layer_points[order]
+
+                    # Log layer size for debugging
+                    x_min, x_max = layer_points[:, 0].min(), layer_points[:, 0].max()
+                    y_min, y_max = layer_points[:, 1].min(), layer_points[:, 1].max()
+                    logger.info(f"Layer {layer_idx}: {layer_size} pts, size: {x_max-x_min:.1f} x {y_max-y_min:.1f} mm")
 
                     # Engrave all points in this layer
                     for point in layer_points:
@@ -835,6 +916,13 @@ class LaserController:
                     if layer_size > 0:
                         last_xy = (float(layer_points[-1, 0]), float(layer_points[-1, 1]))
 
+                    # Flush command buffer and execute before moving Z
+                    # galvoplotter batches commands into packets; _list_end() flushes
+                    # the current buffer and execute_list() ensures execution starts
+                    self._controller._list_end()
+                    self._controller.execute_list()
+                    self._controller.wait_for_machine_idle()
+
                     # Mark layer as complete for preview
                     if preview is not None:
                         preview.mark_layer_complete(layer_points)
@@ -849,7 +937,9 @@ class LaserController:
                         checkpoint_manager.save(checkpoint)
                         logger.debug(f"Checkpoint saved: layer {layer_idx + 1}, {completed} points")
 
-            # Wait for completion
+            # Flush any remaining commands and wait for completion
+            self._controller._list_end()
+            self._controller.execute_list()
             self._controller.wait_for_machine_idle()
 
             elapsed = time.time() - start_time
