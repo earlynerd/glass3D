@@ -512,14 +512,10 @@ def engrave(
         final_checkpoint: CheckpointData | None = None
         try:
             with LaserController(cfg) as laser:
-                # Upload hardware correction table if specified
+                # Note: Hardware correction table is uploaded by engrave_point_cloud()
+                # after entering the marking context to avoid galvoplotter re-init issues
                 if cor_file:
-                    from .device.correction import CorrectionTable, write_correction_to_controller
-
-                    console.print(f"[cyan]Uploading correction table: {cor_file}[/cyan]")
-                    cor_table = CorrectionTable.from_cor_file(cor_file)
-                    write_correction_to_controller(laser._controller, cor_table)
-                    console.print("[green]Hardware correction enabled[/green]")
+                    console.print(f"[cyan]Hardware correction: {cor_file}[/cyan]")
 
                 final_checkpoint = laser.engrave_point_cloud(
                     cloud,

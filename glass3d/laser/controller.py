@@ -414,7 +414,7 @@ class LaserController:
         """Connect to the laser controller."""
         if self._connected:
             return
-        
+
         try:
             from galvo import GalvoController
 
@@ -433,10 +433,10 @@ class LaserController:
             self._connected = True
             logger.info("Laser controller connected")
 
-            # Upload glass3d .cor file if specified (uses different format than galvoplotter)
-            if self.config.cor_file and not self.config.mock_laser:
-                self._upload_correction_table()
-            
+            # Note: Correction table is uploaded in engrave_point_cloud() AFTER
+            # entering the marking context, because galvoplotter may re-init
+            # when marking() is called, which would overwrite any table uploaded here.
+
         except ImportError:
             raise RuntimeError(
                 "galvoplotter not installed. Install with: pip install galvoplotter (imports as 'galvo')"
@@ -456,11 +456,10 @@ class LaserController:
                 self._connected = False
 
     def _upload_correction_table(self) -> None:
-        """Upload glass3d .cor file to controller.
+        """Upload correction table to controller (for dynamic updates).
 
-        Glass3D uses a 5-byte format for .cor files which is different from
-        galvoplotter's expected format. This method loads the glass3d format
-        and uploads it using the proper conversion.
+        This method can be used to upload a new correction table after
+        the initial connection without sending RESET first.
         """
         if not self.config.cor_file or not self._controller:
             return
@@ -809,6 +808,11 @@ class LaserController:
             with context as c:
                 # Clear any pending commands from previous operations
                 self._controller.reset_list()
+
+                # Upload correction table AFTER entering marking context
+                # This ensures it's sent after any re-init triggered by marking()
+                if self.config.cor_file and not self.config.mock_laser:
+                    self._upload_correction_table()
 
                 points_since_pause = 0
                 last_xy: tuple[float, float] | None = None

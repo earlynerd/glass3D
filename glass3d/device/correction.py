@@ -166,6 +166,44 @@ class CorrectionTable:
         path.write_bytes(data)
         logger.info(f"Wrote correction table to {path}")
 
+    def to_galvoplotter_cor_file(self, path: Path | str) -> None:
+        """Save correction table in galvoplotter's int32 format.
+
+        This format is compatible with galvoplotter's _read_int_correction_file()
+        and can be passed to GalvoController(cor_file=...) for proper init order.
+
+        Format:
+        - 0x16 bytes: header (must NOT be "LMC1COR_1.0" in UTF-16)
+        - 0x0E bytes: additional header (ignored by galvoplotter)
+        - 65x65 x 8 bytes: (int32 dx, int32 dy) little-endian signed
+
+        Args:
+            path: Output path for .cor file
+        """
+        path = Path(path)
+
+        # Header: 0x16 bytes - use "GLASS3D_COR" padded with nulls
+        # This must NOT decode as "LMC1COR_1.0" in UTF-16
+        header = b"GLASS3D_COR\x00" + b"\x00" * (0x16 - 12)
+
+        # Additional header: 0x0E bytes (ignored, just padding)
+        extra_header = b"\x00" * 0x0E
+
+        # Table data: 65x65 entries of (int32 dx, int32 dy)
+        table_data = bytearray(GRID_SIZE * GRID_SIZE * 8)
+
+        for j in range(GRID_SIZE):
+            for i in range(GRID_SIZE):
+                idx = (j * GRID_SIZE + i) * 8
+                dx = int(self.offsets[j, i, 0])
+                dy = int(self.offsets[j, i, 1])
+
+                # Write as signed int32 little-endian
+                struct.pack_into('<ii', table_data, idx, dx, dy)
+
+        path.write_bytes(header + extra_header + bytes(table_data))
+        logger.info(f"Wrote galvoplotter-format correction table to {path}")
+
     def to_galvoplotter_table(self) -> list[tuple[int, int]]:
         """Convert to galvoplotter format for _write_correction_table().
 
@@ -253,11 +291,11 @@ def _compute_correction_lightburn(
     """Compute correction offsets using LightBurn-compatible algorithm.
 
     This matches LightBurn's correction table generation algorithm,
-    which uses cosine-modulated bulge and cross-term trapezoid.
+    which uses parabolic modulation for bulge and halved skew factors.
 
     The formula is:
-        dx = (bulge_x - 1) * x * cos(y * pi/2) + (trap_y - 1) * x * y
-        dy = (bulge_y - 1) * y * cos(x * pi/2) + (trap_x - 1) * x * y
+        dx = (bulge_x - 1) * x * (1 - y^2) + (trap_x - 1) * x * y + (skew_x - 1) / 2 * y
+        dy = (bulge_y - 1) * y * (1 - x^2) + (trap_y - 1) * x * y + (skew_y - 1) / 2 * x
 
     Args:
         x_norm: Normalized X (-1 to 1)
@@ -279,25 +317,24 @@ def _compute_correction_lightburn(
     x = x * correction.x_axis.sign
     y = y * correction.y_axis.sign
 
-    # Bulge correction (cosine-modulated per-axis)
+    # Bulge correction (parabolic modulation per-axis)
     # Each axis's bulge affects its own direction but is modulated
-    # by the perpendicular axis position via cosine
-    dx_bulge = (correction.x_axis.bulge - 1.0) * x * np.cos(y * np.pi / 2)
-    dy_bulge = (correction.y_axis.bulge - 1.0) * y * np.cos(x * np.pi / 2)
+    # by the perpendicular axis position via (1 - pos^2)
+    dx_bulge = (correction.x_axis.bulge - 1.0) * x * (1 - y * y)
+    dy_bulge = (correction.y_axis.bulge - 1.0) * y * (1 - x * x)
 
     # Trapezoid correction (cross-term)
     # Each axis's trapezoid creates a correction proportional to x*y
-    # X trapezoid affects dx, Y trapezoid affects dy
     dx_trap = (correction.x_axis.trapezoid - 1.0) * x * y
     dy_trap = (correction.y_axis.trapezoid - 1.0) * x * y
 
-    # Skew correction (if any)
+    # Skew correction (halved factor to match LightBurn)
     dx_skew = 0.0
     dy_skew = 0.0
     if correction.x_axis.skew != 1.0:
-        dx_skew = (correction.x_axis.skew - 1.0) * y
+        dx_skew = (correction.x_axis.skew - 1.0) / 2.0 * y
     if correction.y_axis.skew != 1.0:
-        dy_skew = (correction.y_axis.skew - 1.0) * x
+        dy_skew = (correction.y_axis.skew - 1.0) / 2.0 * x
 
     dx = dx_bulge + dx_trap + dx_skew
     dy = dy_bulge + dy_trap + dy_skew
